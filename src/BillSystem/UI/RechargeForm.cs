@@ -1,0 +1,493 @@
+using System.Drawing.Drawing2D;
+using BillSystem.Models;
+using BillSystem.Services;
+
+namespace BillSystem.UI;
+
+/// <summary>
+/// 充值窗口：上面一张玻璃卡里选金额 + 生成付款码，下面整块是这个房间的充值记录。
+///
+/// 码不画在这个窗口里，而是弹一个 <see cref="QrDialog"/>，按钮都在码底下。学校那边的码
+/// 只活几分钟，过期就自动重新下一单换一张；取消（或关掉弹窗）之后再申请就是全新的一单。
+/// 下单之后每 3 秒查一次订单，付上了立刻刷一次电量和历史。
+/// </summary>
+internal sealed class RechargeForm : Form, Theme.IBackdropHost
+{
+    private static readonly int[] Presets = { 10, 30, 50, 100, 200, 300, 500 };
+
+    private const int W = 860;
+    private const int H = 560;
+    private const int Pad = 20;
+    private const int CardBottom = 152;      // 上面那张卡到哪儿
+
+    private readonly AppConfig _cfg;
+    private readonly RechargeApi _api;
+    private readonly RechargeStore _store;
+
+    private readonly UiLabel _who = new();
+    private readonly List<UiButton> _presetBtns = new();
+    private readonly UiText _custom = new()
+    {
+        DigitsOnly = true,
+        MaxLength = 4,
+        Placeholder = "自定义",
+        TextAlign = HorizontalAlignment.Center,
+    };
+    private readonly UiButton _btnPay = new("生成付款码", BtnKind.Primary);
+    private readonly UiLabel _state = new();
+
+    private readonly UiLabel _histTitle = new();
+    private readonly RecordList _list = new();
+    private readonly UiLabel _histSum = new();
+
+    private readonly System.Windows.Forms.Timer _tick = new() { Interval = 1000 };
+
+    private QrDialog? _dlg;
+    private int _yuan = 30;
+    private int _preset = 30;       // 最近点过的预设，输入框清空时回到它
+    private bool _amountOk = true;
+    private bool _busy;             // 正在下单，别重入
+    private int _orderGen;          // 第几次下单：旧的那次收尾时别去动新的那次的状态
+    private RechargeOrder? _order;
+    private CancellationTokenSource? _work;
+    private DateTime _lastPoll = DateTime.MinValue;
+    private bool _paid;
+
+    /// <summary>
+    /// 窗口活着期间的总闸。关掉窗口就把还在飞的下单/查单/拉历史一起取消，
+    /// 不留着几个请求慢慢超时。链出去的子 CTS 可能比它活得久，所以这个不 Dispose。
+    /// </summary>
+    private readonly CancellationTokenSource _life = new();
+
+    /// <summary>充值成功后触发，让外面立刻查一次电量。</summary>
+    public event Action? PaidSuccessfully;
+
+    public RechargeForm(AppConfig cfg, RechargeApi api, RechargeStore store, bool offline = false)
+    {
+        _cfg = cfg;
+        _api = api;
+        _store = store;
+
+        Text = "电费充值";
+        ClientSize = new Size(W, H);
+        MinimumSize = new Size(W, H);
+        MaximumSize = new Size(W + 400, H + 400);
+        StartPosition = FormStartPosition.CenterParent;
+        MinimizeBox = false;
+        ShowInTaskbar = false;
+        BackColor = Theme.Bg;
+        ForeColor = Theme.Text;
+        Font = Theme.FontBase;
+        DoubleBuffered = true;
+        Theme.ApplyDarkChrome(this);
+
+        Build();
+        Layout1();
+        TabOrder();
+        Resize += (_, _) => Layout1();
+
+        _tick.Tick += (_, _) => OnTick();
+        _tick.Start();
+
+        ShowLocal();
+        if (!offline) _ = ReloadHistoryAsync();   // offline 是出图用的，别联网
+        Fade.In(this);
+    }
+
+    /// <summary>Tab 顺序照界面从上到下、从左到右来：先挑金额，再下单。</summary>
+    private void TabOrder()
+    {
+        int i = 0;
+        foreach (UiButton b in _presetBtns) b.TabIndex = i++;
+        _custom.TabIndex = i++;
+        _btnPay.TabIndex = i;
+    }
+
+    /// <summary>出图用：主窗口摆一句状态，不下单、不联网。</summary>
+    internal void DevPose(string state)
+    {
+        _tick.Stop();
+        SetStateText(state, Theme.TextSub);
+        ShowLocal();
+    }
+
+    /// <summary>出图用：单独造一个付款码弹窗，同样不联网。</summary>
+    internal QrDialog DevQrDialog() => new($"{_cfg.Building} 栋 {_cfg.Room} 房间");
+
+    // ---------- 搭界面 ----------
+
+    private void Build()
+    {
+        _who.Font = Theme.FontTitle;
+        _who.ForeColor = Theme.Text;
+        _who.Text = $"{_cfg.Building} 栋 · {_cfg.Room} 房间";
+        Controls.Add(_who);
+
+        foreach (int y in Presets)
+        {
+            var b = new UiButton($"{y} 元");
+            b.Click += (_, _) => { _preset = y; _custom.Text = ""; SetYuan(y); };
+            _presetBtns.Add(b);
+            Controls.Add(b);
+        }
+
+        // 输入框里有东西就以它为准：非空且在 1~1000 之间就能直接下单，不用先点预设
+        _custom.TextEdited += ApplyCustom;
+        _custom.Submitted += () => { if (_amountOk && !_busy) _ = StartOrderAsync(); };
+        Controls.Add(_custom);
+
+        _btnPay.Click += (_, _) => _ = StartOrderAsync();
+        Controls.Add(_btnPay);
+
+        _state.ForeColor = Theme.TextSub;
+        Controls.Add(_state);
+
+        _histTitle.Font = Theme.FontBold;
+        _histTitle.ForeColor = Theme.Accent;
+        _histTitle.Text = "充值记录";
+        Controls.Add(_histTitle);
+
+        Controls.Add(_list);
+
+        _histSum.Font = Theme.FontSmall;
+        _histSum.ForeColor = Theme.TextDim;
+        Controls.Add(_histSum);
+
+        SetYuan(_yuan);
+    }
+
+    /// <summary>窗口底图：柔光背景 + 上面那张玻璃卡，缩放时重合成一张。</summary>
+    public Bitmap BackdropImage => _backdrop ??= BuildBackdrop();
+
+    private Bitmap? _backdrop;
+
+    private Bitmap BuildBackdrop()
+    {
+        var bmp = new Bitmap(Math.Max(1, ClientSize.Width), Math.Max(1, ClientSize.Height));
+        using Graphics g = Graphics.FromImage(bmp);
+        g.DrawImageUnscaled(Theme.Backdrop(ClientSize), 0, 0);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        Theme.Glass(g, new RectangleF(10, 8, Math.Max(1, ClientSize.Width - 20), CardBottom - 8), 18f, 0.05f);
+        return bmp;
+    }
+
+    protected override void OnPaintBackground(PaintEventArgs e)
+        => e.Graphics.DrawImageUnscaled(BackdropImage, 0, 0);
+
+    private void Layout1()
+    {
+        int w = ClientSize.Width, h = ClientSize.Height;
+
+        // 尺寸变了，底图上那张卡也得跟着重画
+        _backdrop?.Dispose();
+        _backdrop = null;
+
+        _who.SetBounds(Pad, 18, 320, 28);
+
+        // 预设一行排开，最后跟一个自定义输入框
+        const int bw = 80, bh = 34, gap = 8;
+        for (int i = 0; i < _presetBtns.Count; i++)
+            _presetBtns[i].SetBounds(Pad + (bw + gap) * i, 60, bw, bh);
+        _custom.SetBounds(Pad + (bw + gap) * _presetBtns.Count, 60, 92, bh);
+
+        _btnPay.SetBounds(Pad, 104, 168, 36);
+        _state.SetBounds(_btnPay.Right + 14, 104, Math.Max(80, w - _btnPay.Right - 14 - Pad), 36);
+
+        _histTitle.SetBounds(Pad, CardBottom + 16, 80, 22);
+        _histSum.SetBounds(Pad + 88, CardBottom + 17, Math.Max(80, w - Pad * 2 - 88), 20);
+        _list.SetBounds(Pad, CardBottom + 44, w - Pad * 2, Math.Max(80, h - CardBottom - 44 - Pad));
+
+        Invalidate(true);
+    }
+
+    // ---------- 金额 ----------
+
+    /// <summary>输入框内容变了。空了就回到上次点的预设；填了但不在范围内就拦住下单。</summary>
+    private void ApplyCustom(string s)
+    {
+        s = s.Trim();
+        if (s.Length == 0)
+        {
+            _amountOk = true;
+            SetYuan(_preset);
+            ClearRangeWarning();
+            return;
+        }
+
+        if (!int.TryParse(s, out int v) || v < RechargeApi.MinYuan || v > RechargeApi.MaxYuan)
+        {
+            _amountOk = false;
+            foreach (UiButton b in _presetBtns) b.Kind = BtnKind.Ghost;
+            _btnPay.Enabled = false;
+            _btnPay.Text = "生成付款码";
+            // 原来这句单独占一行小字（旁边还写着"充值 30 元"，跟按钮上重复），现在只在真填错时说一次
+            SetStateText(RangeWarning, Theme.Warn);
+            return;
+        }
+
+        _amountOk = true;
+        SetYuan(v);
+        ClearRangeWarning();
+    }
+
+    private static string RangeWarning => $"金额要在 {RechargeApi.MinYuan}~{RechargeApi.MaxYuan} 元之间";
+
+    /// <summary>金额改回正常就把那句话撤掉。状态那儿要是正说着订单的事，别盖。</summary>
+    private void ClearRangeWarning()
+    {
+        if (_state.Text == RangeWarning) SetStateText("", Theme.TextSub);
+    }
+
+    private void SetYuan(int yuan)
+    {
+        _yuan = Math.Clamp(yuan, RechargeApi.MinYuan, RechargeApi.MaxYuan);
+        // 只有一个按钮该是亮的；Kind 变了控件会自己重画，不会留着上一个的高亮
+        foreach (UiButton b in _presetBtns)
+            b.Kind = b.Text == $"{_yuan} 元" ? BtnKind.Primary : BtnKind.Ghost;
+        _dlg?.SetAmount(_yuan);
+        UpdatePayButton();
+    }
+
+    /// <summary>按钮上那行字就是金额本身，不用另摆一句"充值 N 元"。</summary>
+    private void UpdatePayButton()
+    {
+        _btnPay.Text = $"生成 {_yuan} 元付款码";
+        _btnPay.Enabled = _amountOk && !_busy;
+    }
+
+    private void SetStateText(string text, Color color)
+    {
+        _state.ForeColor = color;
+        _state.Text = text;
+    }
+
+    // ---------- 付款码弹窗 ----------
+
+    /// <summary>拿到那个弹窗（没有就新建），顺手摆到前面。</summary>
+    private QrDialog EnsureDialog()
+    {
+        if (_dlg is null || _dlg.IsDisposed)
+        {
+            var d = new QrDialog($"{_cfg.Building} 栋 {_cfg.Room} 房间");
+            d.Regenerate += () => { if (!_busy) _ = StartOrderAsync(); };
+            d.FormClosed += (s, _) =>
+            {
+                if (!ReferenceEquals(s, _dlg)) return;   // 已经被程序换掉了，别管
+                _dlg = null;
+                // 关掉弹窗就是不付了：作废这一单，下次进来重新申请一张新码
+                if (!_paid && (_order is not null || _busy)) CancelOrder("已取消这一单");
+            };
+            _dlg = d;
+        }
+
+        _dlg.SetAmount(_yuan);
+        if (!_dlg.Visible) _dlg.Show(this);
+        _dlg.BringToFront();
+        return _dlg;
+    }
+
+    /// <summary>不走取消逻辑地把弹窗丢掉（换房间、关窗口时用）。</summary>
+    private void DropDialog()
+    {
+        QrDialog? d = _dlg;
+        _dlg = null;
+        if (d is { IsDisposed: false }) d.Close();
+    }
+
+    // ---------- 下单 / 轮询 ----------
+
+    private async Task StartOrderAsync()
+    {
+        if (_busy || !_amountOk) return;
+
+        CancelOrder(null);        // 手上那一单先作废，接下来拿到的一定是新码
+        int gen = ++_orderGen;
+        _paid = false;
+        _busy = true;
+        UpdatePayButton();
+        SetStateText("正在下单…", Theme.TextSub);
+
+        QrDialog dlg = EnsureDialog();
+        dlg.Waiting("正在向学校那边下单…");
+        dlg.SetState("正在下单…", Theme.TextSub);
+
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(_life.Token);
+        _work = cts;
+        try
+        {
+            RechargeOrder order = await _api.CreateWeixinOrderAsync(
+                AppConfig.FixedBuilding, AppConfig.FixedRoom, _yuan, cts.Token);
+            if (gen != _orderGen || IsDisposed) return;
+
+            _order = order;
+            _lastPoll = DateTime.MinValue;
+            _dlg?.ShowQr(order.QrPayload);
+            _busy = false;
+            OnTick();
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            if (gen != _orderGen || IsDisposed) return;
+            _order = null;
+            string msg = ex is ElectricityApiException ? ex.Message : $"下单失败：{ex.Message}";
+            SetStateText(msg, Theme.Bad);
+            _dlg?.Finish("下单失败", msg, Theme.Bad, allowAgain: true);
+        }
+        finally
+        {
+            // 已经有新的一单了就什么都别动，免得把新那单的"正在下单"给擦掉
+            if (gen == _orderGen)
+            {
+                _busy = false;
+                _work = null;
+                UpdatePayButton();
+            }
+            cts.Dispose();
+        }
+    }
+
+    /// <summary>把手上这一单作废。<paramref name="note"/> 给了就在主窗口留一句话。</summary>
+    private void CancelOrder(string? note)
+    {
+        _orderGen++;              // 在飞的那次回来后自己闭嘴
+        _work?.Cancel();          // 收尾时自己 Dispose，这儿只按下取消
+        _work = null;
+        _order = null;
+        _busy = false;
+        if (note is not null) SetStateText(note, Theme.TextSub);
+    }
+
+    /// <summary>一秒一跳：更新倒计时、到期就换码、顺便每 3 秒查一次订单。</summary>
+    private void OnTick()
+    {
+        if (_order is null) return;
+
+        double left = (_order.ExpiresAt - DateTime.Now).TotalSeconds;
+        if (left <= 0)
+        {
+            // 网页也是这么干的：过期就重新下一单换张新码
+            SetStateText("付款码过期了，正在换一张…", Theme.TextSub);
+            _dlg?.SetState("付款码过期了，正在换一张…", Theme.TextSub);
+            _ = StartOrderAsync();
+            return;
+        }
+
+        if (!_paid)
+        {
+            string text = $"等待付款 · 这张码还有 {(int)left / 60:0}:{(int)left % 60:00}";
+            Color c = left <= 30 ? Theme.Warn : Theme.TextSub;
+            SetStateText(text, c);
+            _dlg?.SetState(text, c);
+        }
+
+        if ((DateTime.Now - _lastPoll).TotalSeconds >= 3)
+        {
+            _lastPoll = DateTime.Now;
+            _ = PollOrderAsync(_order);
+        }
+    }
+
+    private async Task PollOrderAsync(RechargeOrder order)
+    {
+        try
+        {
+            PayResult r = await _api.CheckOrderAsync(order.OrderCode, _life.Token);
+            if (!ReferenceEquals(order, _order) || IsDisposed) return;
+
+            switch (r)
+            {
+                case PayResult.Paid:
+                    _paid = true;
+                    _order = null;
+                    SetStateText($"充值成功 · {_yuan} 元", Theme.Good);
+                    _dlg?.Finish($"{_yuan} 元已到账", $"充值成功 · {_yuan} 元", Theme.Good, allowAgain: false);
+                    PaidSuccessfully?.Invoke();
+                    await ReloadHistoryAsync();
+                    break;
+
+                case PayResult.Failed:
+                    _order = null;
+                    SetStateText("这一单支付失败，可以再生成一张", Theme.Bad);
+                    _dlg?.Finish("这一单失败了", "支付失败，可以再生成一张", Theme.Bad, allowAgain: true);
+                    break;
+            }
+        }
+        catch (Exception)
+        {
+            // 查单失败不打断：下一次 tick 再试，二维码还在那儿
+        }
+    }
+
+    // ---------- 历史 ----------
+
+    private void ShowLocal()
+    {
+        _list.SetItems(_store.Snapshot());
+        _histSum.Text = _store.Count == 0
+            ? "还没有充值记录"
+            : $"共 {_store.Count} 笔 · 累计 {_store.TotalYuan():0.##} 元 · 本月 {_store.MonthTotalYuan():0.##} 元";
+    }
+
+    private async Task ReloadHistoryAsync()
+    {
+        try
+        {
+            List<RechargeRecord> fromServer =
+                await _api.QueryHistoryAsync(_store.Building, _store.Room, ct: _life.Token);
+            if (IsDisposed) return;
+
+            _store.Merge(fromServer);
+            ShowLocal();      // 新增了几笔不用另说一句，列表和"共 N 笔"自己就变了
+        }
+        catch (OperationCanceledException)
+        {
+            // 窗口关了，不用管
+        }
+        catch (Exception ex)
+        {
+            if (IsDisposed) return;
+            ShowLocal();
+            _histSum.Text = $"记录没拉到：{ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// 外面（后台同步）往本地仓库里合进了新记录，重画一下列表。
+    /// <b>不能碰手上那一单</b>：后台同步随时会发生，正扫着的码不该因此作废。
+    /// </summary>
+    public void ReloadLocal() => ShowLocal();
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        _life.Cancel();
+        CancelOrder(null);
+        DropDialog();
+        base.OnFormClosing(e);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _tick.Dispose();
+            _life.Cancel();
+            _work?.Cancel();
+            DropDialog();
+            _backdrop?.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (keyData == Keys.Escape)
+        {
+            Close();
+            return true;
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+}

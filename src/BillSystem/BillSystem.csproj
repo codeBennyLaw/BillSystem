@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>BillSystem</AssemblyName>
+    <RootNamespace>BillSystem</RootNamespace>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationDefaultFont>Microsoft YaHei UI, 9pt</ApplicationDefaultFont>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Product>宿舍电费助手</Product>
+    <AssemblyTitle>宿舍电费助手</AssemblyTitle>
+    <Version>1.0.0</Version>
+    <NeutralLanguage>zh-Hans</NeutralLanguage>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+</Project>

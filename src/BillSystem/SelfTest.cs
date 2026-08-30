@@ -1,0 +1,431 @@
+using System.Text;
+using System.Text.Json;
+using BillSystem.Models;
+using BillSystem.Services;
+
+namespace BillSystem;
+
+/// <summary>
+/// 开发用自检：<c>BillSystem.exe --selftest</c>，结果写到 %TEMP%\billsystem-selftest.txt。
+/// 校验的是"累计读数 → 各粒度用电量"这段换算，出错了图表就全是错的。
+/// </summary>
+internal static class SelfTest
+{
+    public static int Run()
+    {
+        var log = new StringBuilder();
+        int failed = 0;
+
+        void Check(string name, bool ok, string detail = "")
+        {
+            if (!ok) failed++;
+            log.AppendLine($"{(ok ? "PASS" : "FAIL")}  {name}{(detail.Length > 0 ? "  → " + detail : "")}");
+        }
+
+        var t0 = new DateTime(2026, 8, 20, 6, 0, 0);
+        var readings = new List<Reading>
+        {
+            R(t0, used: 100, remain: 60),
+            R(t0.AddHours(6), used: 106, remain: 54),   // 6 度 / 6 小时
+            R(t0.AddHours(30), used: 130, remain: 30),  // 24 度 / 24 小时
+        };
+
+        List<Bucket> hours = UsageAggregator.Build(readings, Granularity.Hour, t0, t0.AddHours(30));
+        Check("小时数=30", hours.Count == 30, hours.Count.ToString());
+        Check("前 6 小时各 1.00 度", hours.Take(6).All(b => Math.Abs(b.Usage - 1.0) < 1e-9),
+            string.Join(",", hours.Take(6).Select(b => b.Usage.ToString("0.###"))));
+        Check("后 24 小时各 1.00 度", hours.Skip(6).All(b => Math.Abs(b.Usage - 1.0) < 1e-9));
+        Check("小时合计=30 度", Math.Abs(hours.Sum(b => b.Usage) - 30) < 1e-9,
+            hours.Sum(b => b.Usage).ToString("0.###"));
+        Check("每个小时都算已覆盖", hours.All(b => b.Covered));
+
+        List<Bucket> days = UsageAggregator.Build(readings, Granularity.Day, t0, t0.AddHours(30));
+        Check("天数=2", days.Count == 2, days.Count.ToString());
+        Check("8-20 用电=18 度", Math.Abs(days[0].Usage - 18) < 1e-9, days[0].Usage.ToString("0.###"));
+        Check("8-21 用电=12 度", Math.Abs(days[1].Usage - 12) < 1e-9, days[1].Usage.ToString("0.###"));
+        Check("日合计=小时合计", Math.Abs(days.Sum(b => b.Usage) - hours.Sum(b => b.Usage)) < 1e-9);
+        Check("剩余电量顺延到区间末", days[1].Remaining is { } rr && Math.Abs(rr - 30) < 1e-9);
+
+        Check("UsageBetween 全区间=30",
+            Math.Abs(UsageAggregator.UsageBetween(readings, t0, t0.AddHours(30)) - 30) < 1e-9);
+        Check("UsageBetween 半区间=3",
+            Math.Abs(UsageAggregator.UsageBetween(readings, t0, t0.AddHours(3)) - 3) < 1e-9);
+
+        // 换表/清零：累计读数变小，不能算成负用电
+        var reset = new List<Reading> { R(t0, 100, 20), R(t0.AddHours(2), 5, 200) };
+        Check("换表不产生负数用电",
+            UsageAggregator.Build(reset, Granularity.Hour, t0, t0.AddHours(2)).All(b => b.Usage == 0));
+
+        // 区间内没数据的桶不能被当成 0 用电
+        List<Bucket> gap = UsageAggregator.Build(readings, Granularity.Day, t0.AddDays(-3), t0.AddHours(30));
+        Check("无数据区间标记为未覆盖", gap.Take(3).All(b => !b.Covered));
+
+        // 最后一次抄表之后的那几个小时同样是"还没数据"，不能补成 0，
+        // 否则小时曲线画到右端会直接掉到底
+        List<Bucket> tail = UsageAggregator.Build(readings, Granularity.Hour, t0, t0.AddHours(34));
+        Check("最后一次抄表之后未覆盖", tail.Count == 34 && tail.Skip(30).All(b => !b.Covered),
+            string.Join(",", tail.Skip(30).Select(b => b.Covered ? "1" : "0")));
+
+        // 只有一条抄表记录：算不出用电量，但那一天/那一月得算"有数据"，否则图表整块空白
+        var single = new List<Reading> { R(t0.AddHours(3), 100, 31.68) };
+        List<Bucket> one = UsageAggregator.Build(single, Granularity.Day, t0.Date, t0.Date.AddDays(1));
+        Check("单条记录当天算已覆盖", one.Count == 1 && one[0].Covered && one[0].Usage == 0);
+        Check("单条记录带出剩余电量",
+            one[0].Remaining is { } o1 && Math.Abs(o1 - 31.68) < 1e-9);
+        List<Bucket> oneMonth = UsageAggregator.Build(single, Granularity.Month,
+            new DateTime(2026, 8, 1), new DateTime(2026, 9, 1));
+        Check("单条记录当月算已覆盖", oneMonth.Count == 1 && oneMonth[0].Covered);
+
+        Summary s = UsageAggregator.Summarize(readings, t0.AddHours(30));
+        Check("Summary 剩余=30", s.Remaining is { } sr && Math.Abs(sr - 30) < 1e-9);
+        Check("Summary 日均>0", s.AvgDaily is > 0, s.AvgDaily?.ToString("0.###") ?? "null");
+
+        // 预计可用不足设定天数：度数还在阈值以上也要发提醒
+        Check("剩不到设定天数算紧急",
+            new Summary { DaysLeft = 0.4 }.RunsOutWithin(0.5)
+            && !new Summary { DaysLeft = 0.6 }.RunsOutWithin(0.5));
+        Check("天数调到 0 就是不看这一条", !new Summary { DaysLeft = 0.1 }.RunsOutWithin(0));
+        Check("算不出预计可用就不算紧急", !new Summary().RunsOutWithin(0.5));
+
+        // ---------- 整点归属：3:00 的读数减 2:00 的读数，整段记在"两点"那一格 ----------
+
+        var day = new DateTime(2026, 8, 20);
+        var pair = new List<Reading> { R(day.AddHours(2), 200, 40), R(day.AddHours(3), 201.5, 38.5) };
+        List<Bucket> slots = UsageAggregator.Build(pair, Granularity.Hour, day.AddHours(1), day.AddHours(5));
+        Check("整点格数=4", slots.Count == 4, slots.Count.ToString());
+        Check("两点那格=1.5 度", Math.Abs(slots[1].Usage - 1.5) < 1e-9, slots[1].Usage.ToString("0.###"));
+        Check("两点那格算已覆盖", slots[1].Covered);
+        Check("三点那格还没数据", !slots[2].Covered);
+        Check("一点那格没有数据", !slots[0].Covered);
+        Check("两点期末剩余=38.5", slots[1].Remaining is { } sq && Math.Abs(sq - 38.5) < 1e-9,
+            slots[1].Remaining?.ToString("0.##") ?? "null");
+
+        Check("SlotOf 差 20 毫秒也算下一个整点",
+            Reading.SlotOf(new DateTime(2026, 8, 20, 2, 59, 59, 980)) == day.AddHours(3));
+        Check("SlotOf 整点后几秒还是这个整点",
+            Reading.SlotOf(new DateTime(2026, 8, 20, 3, 0, 3)) == day.AddHours(3));
+        Check("SlotOf 不到半点归本整点",
+            Reading.SlotOf(new DateTime(2026, 8, 20, 3, 20, 0)) == day.AddHours(3));
+        Check("SlotOf 过了半点还是归本整点",
+            Reading.SlotOf(new DateTime(2026, 8, 20, 3, 42, 0)) == day.AddHours(3));
+        Check("SlotOf 差 5 分钟内算下一格",
+            Reading.SlotOf(new DateTime(2026, 8, 20, 3, 56, 0)) == day.AddHours(4));
+
+        // 漏采（程序没开）的那几个小时：增量按时间比例摊回去，不是全压在最后一格
+        var skipped = new List<Reading> { R(day.AddHours(2), 200, 40), R(day.AddHours(5), 203, 37) };
+        List<Bucket> spread = UsageAggregator.Build(skipped, Granularity.Hour, day.AddHours(2), day.AddHours(6));
+        Check("漏采三格各 1.00 度", spread.Take(3).All(b => Math.Abs(b.Usage - 1.0) < 1e-9),
+            string.Join(",", spread.Take(3).Select(b => b.Usage.ToString("0.###"))));
+
+        // ---------- 学校两个钟才抄一次表：中间那次整点读数跟上次一模一样 ----------
+
+        // 直接拿相邻整点相减会变成"一个钟 2 度、下一个钟 0 度"的锯齿，
+        // 增量得摊在两次抄表之间
+        var lag = new List<Reading>
+        {
+            Rt(day.AddHours(1), day.AddHours(1), 100, 30),
+            Rt(day.AddHours(2), day.AddHours(1), 100, 30),   // 电表还没上传新读数
+            Rt(day.AddHours(3), day.AddHours(3), 102, 28),
+        };
+        List<Bucket> even = UsageAggregator.Build(lag, Granularity.Hour, day.AddHours(1), day.AddHours(5));
+        Check("两钟一抄表时两个小时各 1.00 度",
+            Math.Abs(even[0].Usage - 1.0) < 1e-9 && Math.Abs(even[1].Usage - 1.0) < 1e-9,
+            string.Join(",", even.Select(b => b.Usage.ToString("0.###"))));
+        Check("两钟一抄表不会出现 0 用电的锯齿",
+            even.Take(2).All(b => b.Covered && b.Usage > 0.5));
+        Check("整段合计还是 2 度", Math.Abs(even.Sum(b => b.Usage) - 2) < 1e-9);
+        Check("抄表之后那两格没数据", !even[2].Covered && !even[3].Covered);
+        Check("重复读数只算一次抄表",
+            UsageAggregator.Summarize(lag, day.AddHours(3)).Points == 2,
+            UsageAggregator.Summarize(lag, day.AddHours(3)).Points.ToString());
+
+        // 抄表落在格子中间：那一格只盖到一半，得标出来（图上画虚线 + 空心点）
+        var half = new List<Reading>
+        {
+            Rt(day.AddHours(1), day.AddHours(1), 100, 30),
+            Rt(day.AddHours(3), day.AddHours(2).AddMinutes(30), 101, 29),
+        };
+        List<Bucket> part = UsageAggregator.Build(half, Granularity.Hour, day.AddHours(1), day.AddHours(4));
+        Check("整格不算半格", part[0].Covered && !part[0].Partial);
+        Check("只抄到一半的那格标成 Partial", part[1].Covered && part[1].Partial);
+        Check("半格分到三分之一度", Math.Abs(part[1].Usage - 1.0 / 3) < 1e-9,
+            part[1].Usage.ToString("0.####"));
+
+        // ---------- 充值标在剩余电量涨上去的那一格 ----------
+
+        var afterPay = new List<Reading>
+        {
+            R(day.AddHours(1), 100, 10),
+            R(day.AddHours(2), 101, 9),
+            R(day.AddHours(3), 102, 39),   // 充进来 30 度
+        };
+        var paid = new List<RechargeRecord>
+        {
+            new() { OrderCode = "P1", PayTime = day.AddHours(2).AddMinutes(30), PayCent = 3000 },
+        };
+        List<Bucket> marked = UsageAggregator.Build(
+            afterPay, Granularity.Hour, day.AddHours(1), day.AddHours(5), paid);
+        Check("充值标在剩余涨上去那一格", marked[1].Recharged && !marked[0].Recharged,
+            string.Join(",", marked.Select(b => b.RechargeYuan.ToString("0.#"))));
+        Check("那一格记的是 30 元", Math.Abs(marked[1].RechargeYuan - 30) < 1e-9);
+        Check("没充值的格子不标",
+            marked.Where((_, i) => i != 1).All(b => !b.Recharged));
+        Check("不给充值记录也照样画得出来",
+            UsageAggregator.Build(afterPay, Granularity.Hour, day.AddHours(1), day.AddHours(5))
+                .All(b => !b.Recharged));
+        Check("月粒度不标充值",
+            UsageAggregator.Build(afterPay, Granularity.Month,
+                    new DateTime(2026, 8, 1), new DateTime(2026, 9, 1), paid)
+                .All(b => !b.Recharged));
+
+        // 一个整点只留一条：同一格再来一次是覆盖，不是新增
+        CheckStore(Check);
+
+        // 充值记录：文件正序、内存倒序
+        CheckRechargeStore(Check);
+
+        // 真实返回样本
+        const string sample = """
+            {"success":true,"code":10000,"message":"查询成功","data":{"id":"2138","schoolId":"1",
+            "schoolName":"五邑大学本校区","apartID":"227","apartName":"43栋","roomID":"2410",
+            "roomName":"43422","usedamp":3343.10,"resamp":31.68,"status":0,
+            "updatedt":"2026-08-29 09:45:36","userTypeID":1,"userTypeName":"学生用电充值"}}
+            """;
+        try
+        {
+            Reading parsed = ElectricityApi.Parse(sample.Replace("\r", "").Replace("\n", ""), 43, 422);
+            Check("解析剩余电量=31.68", Math.Abs(parsed.Remaining - 31.68) < 1e-9);
+            Check("解析累计用电=3343.10", Math.Abs(parsed.Used - 3343.10) < 1e-9);
+            Check("解析抄表时间", parsed.MeterTime == new DateTime(2026, 8, 29, 9, 45, 36));
+            Check("解析时盖上整点", parsed.SlotTime == Reading.SlotOf(parsed.FetchedAt),
+                Reading.FormatTime(parsed.SlotTime));
+        }
+        catch (Exception ex)
+        {
+            Check("解析接口返回", false, ex.Message);
+        }
+
+        // 充值记录：金额单位是分，方式字段要认得
+        var rec = new RechargeRecord
+        {
+            OrderCode = "T1", PayTime = new DateTime(2026, 8, 29, 10, 47, 58),
+            PayCent = 2000, PayMethod = "code", PayResult = "已完成", Building = 43, Room = 422,
+        };
+        Check("分转元=20", Math.Abs(rec.Yuan - 20) < 1e-9, rec.Yuan.ToString("0.##"));
+        Check("扫码充值标签", rec.MethodLabel == "扫码充值", rec.MethodLabel);
+        Check("学生卡标签", new RechargeRecord { PayMethod = "card" }.MethodLabel == "学生卡");
+
+        // ---------- 提醒邮件的内容 ----------
+
+        CheckMail(Check, UsageAggregator.Summarize(readings, t0.AddHours(30)));
+
+        QrSelfTest.Run(Check);
+
+        log.AppendLine();
+        log.AppendLine(failed == 0 ? "全部通过" : $"{failed} 项失败");
+
+        string outPath = Path.Combine(Path.GetTempPath(), "billsystem-selftest.txt");
+        File.WriteAllText(outPath, log.ToString(), new UTF8Encoding(false));
+        return failed;
+    }
+
+    /// <summary>
+    /// 仓库的整点语义：同一个整点写第二次是覆盖（值变了才返回 true），
+    /// 老数据没有 SlotTime 时按采集时间折算成整点补上。用一对假房号，跑完删文件。
+    /// </summary>
+    private static void CheckStore(Action<string, bool, string> check)
+    {
+        string path = Path.Combine(AppConfig.DataDir, "readings-B997-R9997.jsonl");
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+
+            var slot = new DateTime(2026, 8, 20, 2, 0, 0);
+            var store = new ReadingStore(997, 9997);
+            check("同一格第一次写入算新数据", store.TryAdd(Mk(slot, 200, 40)), "");
+            check("同一格原样再写一次不算变化", !store.TryAdd(Mk(slot, 200, 40)), "");
+            check("原样再写一次不往文件里加行", Lines(path) == 1, Lines(path).ToString());
+            check("同一格数值变了算变化", store.TryAdd(Mk(slot, 200.5, 39.5)), "");
+            check("同一格只留一条", store.Count == 1, store.Count.ToString());
+            check("留下的是后写的那条",
+                store.Latest is { } l && Math.Abs(l.Used - 200.5) < 1e-9,
+                store.Latest?.Used.ToString("0.##") ?? "null");
+            check("下一个整点是新的一格", store.TryAdd(Mk(slot.AddHours(1), 201.5, 38.5)) && store.Count == 2,
+                store.Count.ToString());
+
+            // 重新载入：文件里那一格有两行，后写的应该赢
+            var again = new ReadingStore(997, 9997);
+            check("重载后同一格还是一条", again.Count == 2, again.Count.ToString());
+            check("重载后留的是后写的那条",
+                again.Snapshot()[0] is { } f && Math.Abs(f.Used - 200.5) < 1e-9,
+                again.Snapshot()[0].Used.ToString("0.##"));
+            check("载入时把文件收拢成一格一行", Lines(path) == 2, Lines(path).ToString());
+
+            // 老格式：只有 MeterTime / FetchedAt，没有 SlotTime
+            File.AppendAllText(path,
+                """{"MeterTime":"2026-08-20T05:41:00","FetchedAt":"2026-08-20T06:00:00","Used":210,"Remaining":30,"Building":997,"Room":9997}""" + Environment.NewLine);
+            var migrated = new ReadingStore(997, 9997);
+            check("老数据按采集时间补上整点",
+                migrated.Latest is { } m && m.SlotTime == new DateTime(2026, 8, 20, 6, 0, 0),
+                migrated.Latest is { } m2 ? Reading.FormatTime(m2.SlotTime) : "null");
+        }
+        catch (Exception ex)
+        {
+            check("仓库整点语义", false, ex.Message);
+        }
+        finally
+        {
+            try { if (File.Exists(path)) File.Delete(path); } catch { /* 删不掉就算了 */ }
+        }
+    }
+
+    /// <summary>
+    /// 提醒邮件的内容：标题要先说触发的那件事，两份正文（纯文本 / HTML）都得带上关键数字，
+    /// 末尾要写清眼下的提醒条件。只查生成出来的文字，不真的发信。
+    /// </summary>
+    private static void CheckMail(Action<string, bool, string> check, Summary s)
+    {
+        var cfg = new AppConfig { LowThreshold = 5, LowDaysThreshold = 0.5 };
+        Reading r = R(new DateTime(2026, 8, 30, 12, 0, 0), 3352.2, 4.2);
+
+        MailAlert.Letter low = MailAlert.LowLetter(cfg, r, s, true);
+        MailAlert.Letter soon = MailAlert.LowLetter(cfg, r, s, false);
+
+        check("两种触发的标题都是那句告急",
+            low.Subject == "电量告急！将军救急！" && soon.Subject == low.Subject, low.Subject);
+        check("开头那句说明是哪一种触发",
+            low.Text.Contains("已经低于 5 度") && soon.Text.Contains("撑不到 0.5 天"), "");
+        check("正文带剩余 / 预计可用 / 日均",
+            low.Text.Contains("剩余电量：4.20 度")
+            && low.Text.Contains("预计可用：约 ")
+            && low.Text.Contains("日均用电："), "");
+        check("末尾写清两个提醒条件",
+            low.Text.Contains("剩余低于 5 度，或预计可用不足 0.5 天"), "");
+        check("天数调到 0 时只写度数那一条",
+            MailAlert.LowLetter(new AppConfig { LowThreshold = 5, LowDaysThreshold = 0 }, r, s, true)
+                .Text.Contains("提醒条件：剩余低于 5 度。"), "");
+        check("HTML 那份也带着度数和抄表时间",
+            low.Html.Contains("4.20") && low.Html.Contains("抄表时间"), "");
+        check("HTML 没有没闭合的花括号占位",
+            !low.Html.Contains('{') && !low.Html.Contains('}'), "");
+        check("测试信带上眼下的数字和收件人",
+            MailAlert.TestLetter(cfg, s) is { } t
+            && t.Text.Contains("剩余电量：")
+            && t.Text.Contains(AppConfig.MailToLine), "");
+        check("没有汇总数字时也生成得出来",
+            MailAlert.LowLetter(cfg, r, null, true).Text.Contains("剩余电量：4.20 度"), "");
+        check("发件人显示的是房间号", low.FromName == "43栋422", low.FromName);
+        check("测试信的标题和发件人跟真的那封一样",
+            MailAlert.TestLetter(cfg, s) is { } t2
+            && t2.Subject == low.Subject && t2.FromName == low.FromName,
+            $"{MailAlert.TestLetter(cfg, s).Subject} / {MailAlert.TestLetter(cfg, s).FromName}");
+    }
+
+    /// <summary>
+    /// 充值记录：服务器给的是倒序，内存里照倒序摆（界面要"最近一笔在最上面"），
+    /// 落到文件里得是正序（最早的在第一行）。老文件是倒序的，载入时应该自己理顺。
+    /// 用一对假房号，跑完删文件。
+    /// </summary>
+    private static void CheckRechargeStore(Action<string, bool, string> check)
+    {
+        string path = Path.Combine(AppConfig.DataDir, "recharges-B996-R9996.jsonl");
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+
+            var early = new DateTime(2026, 7, 1, 8, 0, 0);
+            var mid = new DateTime(2026, 8, 1, 9, 0, 0);
+            var late = new DateTime(2026, 8, 20, 10, 0, 0);
+
+            // 服务器返回的顺序：最近的在前
+            var store = new RechargeStore(996, 9996);
+            check("合并进来算新增 3 笔",
+                store.Merge(new[] { Pay("C", late), Pay("B", mid), Pay("A", early) }) == 3,
+                store.Count.ToString());
+            check("同一批再合并一次不重复", store.Merge(new[] { Pay("B", mid) }) == 0, store.Count.ToString());
+            check("内存里最近一笔在最前面", store.Snapshot()[0].OrderCode == "C", store.Snapshot()[0].OrderCode);
+            check("文件里最早那笔在第一行", FirstOrder(path) == "A", FirstOrder(path));
+            check("文件里最新那笔在最后一行", LastOrder(path) == "C", LastOrder(path));
+
+            // 中间补一笔更早的：追加写会排到最后，所以这里必须整份重写
+            check("补一笔更早的也算新增", store.Merge(new[] { Pay("Z", early.AddDays(-10)) }) == 1, "");
+            check("补完文件第一行换成那笔更早的", FirstOrder(path) == "Z", FirstOrder(path));
+            check("补完文件最后一行还是最新那笔", LastOrder(path) == "C", LastOrder(path));
+
+            // 老版本留下的倒序文件：载入时理成正序
+            File.WriteAllText(path, string.Join(Environment.NewLine, new[]
+            {
+                Line("C", late), Line("B", mid), Line("A", early), Line("B", mid),
+            }) + Environment.NewLine, new UTF8Encoding(false));
+
+            var again = new RechargeStore(996, 9996);
+            check("重载后按订单号去重", again.Count == 3, again.Count.ToString());
+            check("载入时把倒序文件理成正序", FirstOrder(path) == "A", FirstOrder(path));
+            check("载入时把重复行清掉", Lines(path) == 3, Lines(path).ToString());
+        }
+        catch (Exception ex)
+        {
+            check("充值记录仓库", false, ex.Message);
+        }
+        finally
+        {
+            try { if (File.Exists(path)) File.Delete(path); } catch { /* 删不掉就算了 */ }
+        }
+    }
+
+    private static RechargeRecord Pay(string code, DateTime at) => new()
+    {
+        OrderCode = code, PayTime = at, PayCent = 3000,
+        PayMethod = "code", PayResult = "已完成", Building = 996, Room = 9996,
+    };
+
+    private static string Line(string code, DateTime at) => JsonSerializer.Serialize(Pay(code, at));
+
+    private static string FirstOrder(string path) => OrderAt(path, 0);
+    private static string LastOrder(string path) => OrderAt(path, -1);
+
+    private static string OrderAt(string path, int index)
+    {
+        string[] lines = File.ReadAllLines(path).Where(l => l.Trim().Length > 0).ToArray();
+        if (lines.Length == 0) return "";
+        return JsonSerializer.Deserialize<RechargeRecord>(lines[index < 0 ? lines.Length - 1 : index])?.OrderCode ?? "";
+    }
+
+    /// <summary>jsonl 里有几行真数据（末尾那个空行不算）。</summary>
+    private static int Lines(string path) =>
+        File.Exists(path) ? File.ReadAllLines(path).Count(l => l.Trim().Length > 0) : 0;
+
+    private static Reading Mk(DateTime slot, double used, double remain) => new()
+    {
+        SlotTime = slot,
+        MeterTime = slot.AddMinutes(-19),
+        FetchedAt = slot,
+        Used = used,
+        Remaining = remain,
+        Building = 997,
+        Room = 9997,
+    };
+
+    private static Reading R(DateTime t, double used, double remain) => new()
+    {
+        SlotTime = t,
+        MeterTime = t,
+        FetchedAt = t,
+        Used = used,
+        Remaining = remain,
+        Building = 43,
+        Room = 422,
+    };
+
+    /// <summary>整点和抄表时间分开给：学校两三个钟才抄一次表，这两个时间平时是不一样的。</summary>
+    private static Reading Rt(DateTime slot, DateTime meter, double used, double remain) => new()
+    {
+        SlotTime = slot,
+        MeterTime = meter,
+        FetchedAt = slot,
+        Used = used,
+        Remaining = remain,
+        Building = 43,
+        Room = 422,
+    };
+}
