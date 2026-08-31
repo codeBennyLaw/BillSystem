@@ -10,6 +10,7 @@ namespace BillSystem.Services;
 ///
 /// <b>一个整点只留一条</b>：键是 <see cref="Reading.SlotTime"/>。同一个整点再查到就把那条覆盖掉
 /// （值真的变了才追加一行，载入时后写的一行赢）；下次启动载入完会把文件收拢成一格一行。
+/// 半点那一次查询走的就是这条路——变了就顶替掉整点那条，没变什么都不做。
 /// </summary>
 public sealed class ReadingStore
 {

@@ -24,6 +24,9 @@ public sealed class Bucket
     /// <summary>这一格充了多少钱（元）。0 就是这一格没充值。</summary>
     public double RechargeYuan { get; set; }
 
+    /// <summary>这一格充进来多少度（金额按电价换算）。绿柱子画的就是这一截。</summary>
+    public double RechargeKwh { get; set; }
+
     /// <summary>这一格有充值：剩余电量往上跳的那一格，柱子要换个颜色。</summary>
     public bool Recharged => RechargeYuan > 0;
 
@@ -255,15 +258,17 @@ public static class UsageAggregator
 
     /// <summary>
     /// 充值标在"剩余电量涨上去的那一格"上：钱是这个钟付的，但电表两三个小时才抄一次，
-    /// 柱子跳上去往往是后一格的事。往后最多找 4 格；实在找不到涨上去的那一格
+    /// 柱子跳上去往往是后一格的事。实在找不到涨上去的那一格
     /// （同一格里充的电又用掉了）就标在付款那一格。
     ///
-    /// 只在小时和日粒度标：一个月里几乎次次都有充值，整排柱子全变色就等于没标。
+    /// 月和年粒度直接标付款那一格：电表那两三个小时的延迟在这个尺度上根本看不见，
+    /// 往后找反倒会把月底那几笔挪到下个月去。
     /// </summary>
     private static void MarkRecharges(
         List<Bucket> buckets, Granularity g, DateTime from, IEnumerable<RechargeRecord>? recharges)
     {
-        if (recharges is null || g is Granularity.Month or Granularity.Year) return;
+        if (recharges is null) return;
+        bool findJump = g is Granularity.Hour or Granularity.Day;
 
         foreach (RechargeRecord rc in recharges)
         {
@@ -272,15 +277,41 @@ public static class UsageAggregator
             int i = IndexOf(rc.PayTime, g, from);
             if (i < 0 || i >= buckets.Count) continue;   // 不在这张表画的范围里
 
-            int mark = i;
-            for (int k = i; k < buckets.Count && k <= i + 4; k++)
-            {
-                if (buckets[k].Remaining is not { } cur) continue;
-                double? prev = k > 0 ? buckets[k - 1].Remaining : null;
-                if (prev is null || cur > prev.Value + 0.005) { mark = k; break; }
-            }
-            buckets[mark].RechargeYuan += rc.Yuan;
+            Bucket mark = buckets[findJump ? JumpBucket(buckets, i, rc.Kwh) : i];
+            mark.RechargeYuan += rc.Yuan;
+            mark.RechargeKwh += rc.Kwh;
         }
+    }
+
+    /// <summary>
+    /// 从付款那一格往后找剩余电量跳上去的那一格，最多找 4 格。
+    ///
+    /// 知道这一笔<b>该充进来多少度</b>（金额 ÷ 电价），就挑涨幅离它最近的那一格——光看
+    /// "涨了没有"会被半路的小波动骗走（电表修正过读数，或者同一段里还有第二笔充值）。
+    /// 涨幅不要求够数：同一格里用掉的电会先吃掉一部分。都没涨就标在付款那一格。
+    /// </summary>
+    private static int JumpBucket(List<Bucket> buckets, int pay, double kwh)
+    {
+        int best = -1;
+        double bestGap = double.MaxValue;
+
+        for (int k = pay; k < buckets.Count && k <= pay + 4; k++)
+        {
+            if (buckets[k].Remaining is not { } cur) continue;
+
+            double? prev = null;
+            for (int j = k - 1; j >= 0; j--)
+                if (buckets[j].Remaining is { } pv) { prev = pv; break; }
+
+            // 前面没读数可比（这一格就是这张表的开头）：涨幅算 0，真涨上去的格子优先
+            double rise = prev is { } p0 ? cur - p0 : 0;
+            if (prev is not null && rise <= 0.005) continue;
+
+            double gap = Math.Abs(rise - kwh);
+            if (gap < bestGap) { bestGap = gap; best = k; }
+        }
+
+        return best >= 0 ? best : pay;
     }
 
     /// <summary>任意时间段内的用电量（度），同样摊在两次抄表之间。</summary>

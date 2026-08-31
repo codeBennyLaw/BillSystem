@@ -20,9 +20,12 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
     private const int Pad = 20;
     private const int CardBottom = 152;      // 上面那张卡到哪儿
 
-    private readonly AppConfig _cfg;
     private readonly RechargeApi _api;
-    private readonly RechargeStore _store;
+
+    /// <summary>充的是这一间。主界面切了宿舍就 <see cref="Bind"/> 换过来。</summary>
+    private DormSession _s;
+
+    private RechargeStore Store => _s.Recharges;
 
     private readonly UiLabel _who = new();
     private readonly List<UiButton> _presetBtns = new();
@@ -62,11 +65,10 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
     /// <summary>充值成功后触发，让外面立刻查一次电量。</summary>
     public event Action? PaidSuccessfully;
 
-    public RechargeForm(AppConfig cfg, RechargeApi api, RechargeStore store, bool offline = false)
+    public RechargeForm(RechargeApi api, DormSession session, bool offline = false)
     {
-        _cfg = cfg;
         _api = api;
-        _store = store;
+        _s = session;
 
         Text = "电费充值";
         ClientSize = new Size(W, H);
@@ -112,7 +114,25 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
     }
 
     /// <summary>出图用：单独造一个付款码弹窗，同样不联网。</summary>
-    internal QrDialog DevQrDialog() => new($"{_cfg.Building} 栋 {_cfg.Room} 房间");
+    internal QrDialog DevQrDialog() => new(_s.Dorm.Label);
+
+    /// <summary>主界面换了宿舍：手上那一单立刻作废（充的已经是另一个房间了），记录整条换掉。</summary>
+    public void Bind(DormSession session)
+    {
+        if (ReferenceEquals(session, _s)) return;
+
+        CancelOrder(null);
+        DropDialog();
+        _paid = false;
+        _s = session;
+
+        _who.Text = session.Dorm.Label;
+        SetStateText("", Theme.TextSub);
+        UpdatePayButton();
+        ShowLocal();
+        _ = ReloadHistoryAsync();
+        Invalidate(true);
+    }
 
     // ---------- 搭界面 ----------
 
@@ -120,7 +140,7 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
     {
         _who.Font = Theme.FontTitle;
         _who.ForeColor = Theme.Text;
-        _who.Text = $"{_cfg.Building} 栋 · {_cfg.Room} 房间";
+        _who.Text = _s.Dorm.Label;
         Controls.Add(_who);
 
         foreach (int y in Presets)
@@ -220,7 +240,6 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
             foreach (UiButton b in _presetBtns) b.Kind = BtnKind.Ghost;
             _btnPay.Enabled = false;
             _btnPay.Text = "生成付款码";
-            // 原来这句单独占一行小字（旁边还写着"充值 30 元"，跟按钮上重复），现在只在真填错时说一次
             SetStateText(RangeWarning, Theme.Warn);
             return;
         }
@@ -268,7 +287,7 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
     {
         if (_dlg is null || _dlg.IsDisposed)
         {
-            var d = new QrDialog($"{_cfg.Building} 栋 {_cfg.Room} 房间");
+            var d = new QrDialog(_s.Dorm.Label);
             d.Regenerate += () => { if (!_busy) _ = StartOrderAsync(); };
             d.FormClosed += (s, _) =>
             {
@@ -316,7 +335,7 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
         try
         {
             RechargeOrder order = await _api.CreateWeixinOrderAsync(
-                AppConfig.FixedBuilding, AppConfig.FixedRoom, _yuan, cts.Token);
+                _s.Dorm.Building, _s.Dorm.Room, _yuan, cts.Token);
             if (gen != _orderGen || IsDisposed) return;
 
             _order = order;
@@ -425,10 +444,10 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
 
     private void ShowLocal()
     {
-        _list.SetItems(_store.Snapshot());
-        _histSum.Text = _store.Count == 0
+        _list.SetItems(Store.Snapshot());
+        _histSum.Text = Store.Count == 0
             ? "还没有充值记录"
-            : $"共 {_store.Count} 笔 · 累计 {_store.TotalYuan():0.##} 元 · 本月 {_store.MonthTotalYuan():0.##} 元";
+            : $"共 {Store.Count} 笔 · 累计 {Store.TotalYuan():0.##} 元 · 本月 {Store.MonthTotalYuan():0.##} 元";
     }
 
     private async Task ReloadHistoryAsync()
@@ -436,10 +455,10 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
         try
         {
             List<RechargeRecord> fromServer =
-                await _api.QueryHistoryAsync(_store.Building, _store.Room, ct: _life.Token);
+                await _api.QueryHistoryAsync(Store.Building, Store.Room, ct: _life.Token);
             if (IsDisposed) return;
 
-            _store.Merge(fromServer);
+            Store.Merge(fromServer);
             ShowLocal();      // 新增了几笔不用另说一句，列表和"共 N 笔"自己就变了
         }
         catch (OperationCanceledException)

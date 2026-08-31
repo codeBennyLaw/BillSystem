@@ -20,16 +20,25 @@ internal sealed class MainForm : Form, IMessageFilter
     private readonly UiButton _btnSettings = new("设置");
     private readonly Segment _segG = new();
 
-    private AppConfig _cfg;
-    private readonly ReadingStore _store;
+    /// <summary>宿舍切换器。只记录一间时不摆（没什么可切的），那时候写一行房间名。</summary>
+    private readonly Segment _segDorm = new() { AccessibleName = "宿舍" };
 
-    /// <summary>只为了在图表上标出"这一格充过值"，没有也画得出来（出图和早期版本就是 null）。</summary>
-    private readonly RechargeStore? _recharges;
+    /// <summary>
+    /// 摆的是切换器还是那行房间名。<b>不能拿 <c>_segDorm.Visible</c> 判断</b>：
+    /// 窗口还没 Show 出来时，子控件的 Visible 读回来一律是 false，
+    /// 那时候排版就会摆错，切换器留在左上角 (0,0) 压着标题。
+    /// </summary>
+    private bool _manyDorms;
+
+    private AppConfig _cfg;
+
+    /// <summary>正在看哪一间。一间都没加时是 null——图表和卡片照样画得出来，只是没有数。</summary>
+    private DormSession? _cur;
 
     private PollStatus _status0 = new();
 
     /// <summary>
-    /// 只为了把"已更新 · 刚刚"这句话写对。查询是一小时一次的，中间这句话会越来越不准，
+    /// 只为了把"已更新 · 刚刚"这句话写对。查询是半小时一次的，中间这句话会越来越不准，
     /// 所以窗口开着的时候每半分钟自己改一次；窗口收起来就停，不白转。
     /// </summary>
     private readonly System.Windows.Forms.Timer _ageTick = new() { Interval = 30_000 };
@@ -37,11 +46,12 @@ internal sealed class MainForm : Form, IMessageFilter
     public event Action? RechargeRequested;
     public event Action? SettingsRequested;
 
-    public MainForm(AppConfig cfg, ReadingStore store, RechargeStore? recharges = null)
+    /// <summary>切换器上点了另一间宿舍。</summary>
+    public event Action<DormSession>? DormSwitched;
+
+    public MainForm(AppConfig cfg)
     {
         _cfg = cfg;
-        _store = store;
-        _recharges = recharges;
 
         Text = "宿舍电费助手";
         ClientSize = new Size(1080, 700);
@@ -80,12 +90,12 @@ internal sealed class MainForm : Form, IMessageFilter
     }
 
     /// <summary>
-    /// Tab 顺序：先右上角那两颗（充值、设置），再是图表上面那一排控制项。
+    /// Tab 顺序：宿舍切换器（有两间以上才在）、右上角那两颗（充值、设置），再是粒度那一条。
     /// 卡片和图表不进 Tab 环——它们没有可操作的东西，Tab 停在上面只是让人多按两下。
     /// </summary>
     private void TabOrder()
     {
-        Control[] order = { _btnRecharge, _btnSettings, _segG };
+        Control[] order = { _segDorm, _btnRecharge, _btnSettings, _segG };
         for (int i = 0; i < order.Length; i++)
         {
             order[i].TabStop = true;
@@ -103,6 +113,13 @@ internal sealed class MainForm : Form, IMessageFilter
         _room.Font = Theme.FontSmall;
         _room.ForeColor = Theme.TextDim;
         Controls.Add(_room);
+
+        _segDorm.Visible = false;
+        _segDorm.SelectionChanged += tag =>
+        {
+            if (tag is DormSession s && !ReferenceEquals(s, _cur)) DormSwitched?.Invoke(s);
+        };
+        Controls.Add(_segDorm);
 
         _status.ForeColor = Theme.TextSub;
         _status.TextAlign = ContentAlignment.MiddleRight;
@@ -169,8 +186,19 @@ internal sealed class MainForm : Form, IMessageFilter
         _btnSettings.SetBounds(_btnRecharge.Left - 10 - 80, 20, 80, 34);
 
         _title.SetBounds(Pad, 16, 420, 28);
-        _room.SetBounds(Pad + 2, 44, 560, 18);
         _status.SetBounds(Pad + 570, 24, Math.Max(60, _btnSettings.Left - Pad - 582), 26);
+
+        // 标题底下这一行：两间以上摆切换器，只有一间（或一间都没有）就写一行字
+        if (_manyDorms)
+        {
+            // 这一行跟右上那两个按钮同高，间数多了得掐住宽度，别顶到按钮上
+            _segDorm.FitWidth(76);
+            _segDorm.SetBounds(Pad, 42, Math.Min(_segDorm.Width, Math.Max(80, _btnSettings.Left - 12 - Pad)), 32);
+        }
+        else
+        {
+            _room.SetBounds(Pad + 2, 44, 560, 18);
+        }
 
         // 五张卡片等分一行
         const int cardsY = 86, cardH = 104, gap = 14;
@@ -179,7 +207,6 @@ internal sealed class MainForm : Form, IMessageFilter
         for (int i = 0; i < cards.Length; i++)
             cards[i].SetBounds(Pad + (cardW + gap) * i, cardsY, cardW, cardH);
 
-        // 粒度那一条单独占一行，右边留空——原来那行数据目录的小字删了，入口挪到托盘菜单
         int rowB = cardsY + cardH + 16;
         _segG.AutoWidth(58);
         _segG.SetBounds(Pad, rowB, _segG.Width, 34);
@@ -217,12 +244,42 @@ internal sealed class MainForm : Form, IMessageFilter
         base.Dispose(disposing);
     }
 
+    /// <summary>宿舍名单变了（加了、删了、刚启动）就整条重摆切换器。</summary>
+    public void SetDorms(IReadOnlyList<DormSession> sessions, DormSession? current)
+    {
+        _segDorm.Clear();
+        foreach (DormSession s in sessions) _segDorm.Add(s.Dorm.Short, s);
+
+        bool many = sessions.Count > 1;
+        _manyDorms = many;
+        _segDorm.Visible = many;
+        _room.Visible = !many;
+        Bind(current);
+    }
+
+    /// <summary>换到某一间。一间都没加时传 null，界面照样立得住，只是没有数。</summary>
+    public void Bind(DormSession? s)
+    {
+        _cur = s;
+        if (s is not null) _segDorm.Select(s);
+
+        _status0 = s?.Poll.Status ?? new PollStatus();
+        _btnRecharge.Enabled = s is not null;
+        _room.Text = s?.Dorm.Label ?? "还没有添加宿舍：到设置里加一间";
+
+        Layout1();
+        _chart.ScrollToEnd();
+        ApplyStatusText();
+        RefreshData();
+        Invalidate(true);
+    }
+
     /// <summary>把整段历史（有上限）交给图表，之后左右滑动都由图表自己管。</summary>
     public void RefreshData()
     {
         Granularity g = _cfg.Granularity;
         DateTime now = DateTime.Now;
-        List<Reading> all = _store.Snapshot();
+        List<Reading> all = _cur?.Readings.Snapshot() ?? new List<Reading>();
 
         int span = UsageAggregator.DefaultWindow(g);
         DateTime end = UsageAggregator.Step(UsageAggregator.Floor(now, g), g, 1);
@@ -243,20 +300,20 @@ internal sealed class MainForm : Form, IMessageFilter
 
         _chart.Granularity = g;
         _chart.Span = span;
-        _chart.EmptyText = all.Count == 0 ? "还没有历史数据" : "这段时间没有数据";
-        _chart.Data = UsageAggregator.Build(all, g, start, end, _recharges?.Snapshot());
-
-        _room.Text = $"{AppConfig.FixedBuilding} 栋 · {AppConfig.FixedRoom} 房间";
+        _chart.EmptyText = _cur is null ? "还没有添加宿舍"
+            : all.Count == 0 ? "还没有历史数据"
+            : "这段时间没有数据";
+        _chart.Data = UsageAggregator.Build(all, g, start, end, _cur?.Recharges.Snapshot());
 
         UpdateCards(UsageAggregator.Summarize(all, now));
     }
 
-    /// <summary>后台查询状态变化时调用。</summary>
+    /// <summary>后台查询状态变化时调用（只有正看着的那一间会传进来）。</summary>
     public void UpdateStatus(PollStatus st)
     {
         _status0 = st;
         ApplyStatusText();
-        UpdateCards(UsageAggregator.Summarize(_store.Snapshot(), DateTime.Now));
+        UpdateCards(UsageAggregator.Summarize(_cur?.Readings.Snapshot() ?? new List<Reading>(), DateTime.Now));
     }
 
     /// <summary>右上角那句状态。单独拎出来是因为"多久之前"要随时间自己走。</summary>

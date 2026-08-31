@@ -1,3 +1,4 @@
+using System.Drawing.Imaging;
 using BillSystem.Interop;
 using BillSystem.Models;
 using BillSystem.Services;
@@ -5,13 +6,17 @@ using BillSystem.Services;
 namespace BillSystem.UI;
 
 /// <summary>
-/// 任务栏最左侧那一条：紧凑的两行读数（剩余电量 / 抄表时间，可选今日 / 日均），
-/// 没有边框和背景块，底色直接取任务栏的颜色，看着像任务栏自带的一部分。
+/// 任务栏最左侧那一条：紧凑的两行读数（剩余电量 / 抄表时间，可选今日 / 日均）。
+/// <b>只有字，没有底</b>——窗口是分层窗口（<c>WS_EX_LAYERED</c>），整块位图连 alpha 一起交给
+/// 系统合成，笔画之外的地方是真透明的，看着就是任务栏上多了几个字。
 ///
-/// 实现上是一个独立的置顶小窗，但会把自己认到 <c>Shell_TrayWnd</c> 名下（owner）：
-/// 系统保证窗口画在自己 owner 的上面，所以切换应用时任务栏被抬到最前，它是跟着一起
-/// 上来的——不需要再去抢 Z 序，也就没有"消失一下又出现"的闪烁。位置跟着任务栏窗口的
-/// 真实矩形走，任务栏自动隐藏或前台是全屏窗口时，自己挪到屏幕外让开。
+/// 这么做顺带治了老毛病：普通窗口的画面得靠自己收到 WM_PAINT 才补，任务栏在上面重画一次
+/// 就能把它擦没了，得等切个窗口才回来。分层窗口的画面存在 DWM 那边，谁在上面画都擦不掉。
+///
+/// 位置上是一个独立的置顶小窗，但会把自己认到 <c>Shell_TrayWnd</c> 名下（owner）：系统保证
+/// 窗口画在自己 owner 的上面，所以切换应用时任务栏被抬到最前，它是跟着一起上来的。万一这条
+/// 路在某台机器上不管用（发现自己被别的窗口埋了两秒还没出来），就退回自己定时抢 Z 序。
+/// 位置跟着任务栏窗口的真实矩形走，任务栏自动隐藏或前台是全屏窗口时，自己挪到屏幕外让开。
 /// </summary>
 internal sealed class TaskbarWidget : Form
 {
@@ -19,13 +24,17 @@ internal sealed class TaskbarWidget : Form
     private readonly WidgetTip _tip = new();
 
     private AppConfig _cfg;
+    private Dorm? _dorm;
     private IntPtr _taskbar = IntPtr.Zero;
-    private bool _owned;   // 已经认到任务栏名下（认不上就退回定时置顶）
-    private bool _away;    // 正让开：任务栏自动隐藏了，或者前台是全屏窗口
+    private bool _owned;      // 已经认到任务栏名下（认不上就退回定时置顶）
+    private bool _adoptOff;   // 认过了但压不住，别再认了
+    private int _buried;      // 连续几拍发现自己被埋着
+    private bool _away;       // 正让开：任务栏自动隐藏了，或者前台是全屏窗口
     private bool _frozen;
     private int _desiredWidth = 150;
     private int _lastHeight;
     private Font? _fontValue, _fontLabel;
+    private Bitmap? _surface;
 
     private double? _remaining, _today, _avgDaily;
     private DateTime? _meterTime;
@@ -40,8 +49,9 @@ internal sealed class TaskbarWidget : Form
     private Win32.WinEventProc? _fgProc;
     private IntPtr _fgHook;
 
-    private Color _bg = Color.FromArgb(0x20, 0x20, 0x20);
-    private DateTime _bgChecked = DateTime.MinValue;
+    /// <summary>任务栏是浅色还是深色：字的颜色跟着系统主题走（任务栏本来也跟着它走）。</summary>
+    private bool _light;
+    private DateTime _lightChecked = DateTime.MinValue;
 
     public event Action? LeftClicked;
     public ContextMenuStrip? WidgetMenu { get; set; }
@@ -57,7 +67,7 @@ internal sealed class TaskbarWidget : Form
         Text = "宿舍电费";
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
                  | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
-        _bg = FallbackBack();
+        _light = Theme.SystemUsesLightTheme();
         _keeper.Tick += (_, _) => Keep();
     }
 
@@ -69,6 +79,8 @@ internal sealed class TaskbarWidget : Form
         {
             CreateParams cp = base.CreateParams;
             cp.ExStyle |= Win32.WS_EX_TOOLWINDOW | Win32.WS_EX_NOACTIVATE;
+            // 出图（--screenshot）走 DrawToBitmap，那条路要的是普通窗口的重画
+            if (!_frozen) cp.ExStyle |= Win32.WS_EX_LAYERED;
             return cp;
         }
     }
@@ -77,10 +89,12 @@ internal sealed class TaskbarWidget : Form
     {
         TopMost = true;
         if (!Visible) Show();
+        _adoptOff = false;
+        _buried = 0;
         Adopt();
         Reposition();
         Raise();
-        RefreshBackColor();
+        Render();
         HookForeground();
         _keeper.Start();
     }
@@ -101,7 +115,7 @@ internal sealed class TaskbarWidget : Form
     /// </summary>
     private void Adopt()
     {
-        if (_frozen || !IsHandleCreated) return;
+        if (_frozen || _adoptOff || !IsHandleCreated) return;
 
         _taskbar = Win32.FindTaskbar();
         _owned = _taskbar != IntPtr.Zero && Win32.TrySetOwner(Handle, _taskbar);
@@ -115,8 +129,8 @@ internal sealed class TaskbarWidget : Form
     }
 
     /// <summary>
-    /// 切前台窗口的当下要办两件事：全屏程序上来了就赶紧让开；万一没认到任务栏名下，
-    /// 还得像以前那样立刻把自己顶回去（等定时器那一拍就已经看得出闪了）。
+    /// 切前台窗口的当下要办两件事：全屏程序上来了就赶紧让开；新窗口压在自己身上就立刻顶回去
+    /// （等定时器那一拍已经看得出闪了）。
     /// </summary>
     private void HookForeground()
     {
@@ -125,7 +139,7 @@ internal sealed class TaskbarWidget : Form
         {
             if (ev != Win32.EVENT_SYSTEM_FOREGROUND) return;
             Reposition();
-            if (!_owned) Raise();
+            Unbury();
         };
         _fgHook = Win32.HookForeground(_fgProc);
     }
@@ -143,8 +157,11 @@ internal sealed class TaskbarWidget : Form
         Measure();
         Reposition();
         Raise();
-        Invalidate();
+        Render();
     }
+
+    /// <summary>组件显示的是主界面上正看着的那一间，悬停卡的标题也跟着换。</summary>
+    public void SetDorm(Dorm? dorm) => _dorm = dorm;
 
     /// <summary>
     /// 开发出图用（--screenshot）：按给定高度定尺寸、留在原地渲染，不去贴任务栏。
@@ -161,33 +178,83 @@ internal sealed class TaskbarWidget : Form
     /// <summary>开发出图用：把组件自己那张悬停卡拿去画，免得出图时另抄一份内容。</summary>
     internal WidgetTip DevTip() => _tip;
 
-    /// <summary>每 0.25 秒查一次：explorer 重启过就重新认一次，位置被挤走就摆回去，顺手对底色、管悬停卡。</summary>
+    /// <summary>
+    /// 每 0.25 秒查一次：explorer 重启过就重新认一次，位置被挤走就摆回去，
+    /// 顺手看看自己有没有被别的窗口埋掉、跟一下系统主题、管悬停卡。
+    /// </summary>
     private void Keep()
     {
         // owner 没了自己也会被销毁（explorer 重启），WinForms 这边只会看到句柄不见了
         if (!_frozen && !IsHandleCreated)
         {
             _owned = false;
+            _adoptOff = false;   // 换了个新任务栏，认一认说不定就成了
             Hide();
             Show();
             TopMost = true;
+            Render();
         }
 
         if (!_frozen && (!_owned || _taskbar != Win32.FindTaskbar() || Win32.GetOwner(Handle) != _taskbar))
             Adopt();
 
         Reposition();
-        Raise();
+        Unbury();
         SyncTip();
-        RefreshBackColor();
+        RefreshTheme();
     }
 
     /// <summary>
-    /// 认不到任务栏名下时的退路：只改 Z 序、不动位置大小——反复重设位置会把悬停卡和系统气泡挤掉。
+    /// 盯着自己有没有被埋掉。认在任务栏名下的时候 Z 序本该由系统包办，可 Win11 的任务栏改版
+    /// 频繁，真出了岔子的表现就是用户说的"闪一下没了、切个窗口才回来"——所以还是自己看一眼：
+    /// 埋着就立刻顶回去，连着两秒顶不动就说明"认 owner"这条路在这台机器上不好使，
+    /// 干脆松开、退回定时抢 Z 序。没被埋的时候一次 SetWindowPos 都不多发。
     /// </summary>
-    private void Raise()
+    private void Unbury()
     {
-        if (_owned || _away || _frozen || !Visible || !IsHandleCreated) return;
+        if (_frozen || _away || !Visible || !IsHandleCreated) return;
+
+        if (!Covered())
+        {
+            _buried = 0;
+            if (!_owned) Raise();
+            return;
+        }
+
+        _buried++;
+        Raise(force: true);
+
+        if (_buried >= 8 && _owned)
+        {
+            Release();
+            _adoptOff = true;
+        }
+    }
+
+    /// <summary>
+    /// 正中那一点归不归自己：拿它问系统"这块屏幕现在是谁的窗口"。分层窗口是按 alpha 判定的，
+    /// 整块铺的那层 alpha=1 在这儿正好用得上——没人压着就该问到自己。
+    /// 自己的右键菜单弹出来时会盖住这一点，那不算被埋。
+    /// </summary>
+    private bool Covered()
+    {
+        if (WidgetMenu is { Visible: true }) return false;
+
+        Rectangle rc = ScreenRect();
+        if (rc.Width <= 0 || rc.Height <= 0) return false;
+
+        IntPtr top = Win32.WindowAt(new Point(rc.Left + rc.Width / 2, rc.Top + rc.Height / 2));
+        return top != IntPtr.Zero && top != Handle;
+    }
+
+    /// <summary>
+    /// 只改 Z 序、不动位置大小——反复重设位置会把悬停卡和系统气泡挤掉。
+    /// 认在任务栏名下时平时不插手（<paramref name="force"/> 是发现被埋了的那一下）。
+    /// </summary>
+    private void Raise(bool force = false)
+    {
+        if (_away || _frozen || !Visible || !IsHandleCreated) return;
+        if (_owned && !force) return;
 
         Win32.SetWindowPos(Handle, Win32.HWND_TOPMOST, 0, 0, 0, 0,
             Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_NOACTIVATE);
@@ -293,7 +360,7 @@ internal sealed class TaskbarWidget : Form
         _error = status.Error;
         _busy = status.Busy;
 
-        _tipTitle = $"{_cfg.Building} 栋 {_cfg.Room} 房间";
+        _tipTitle = _dorm?.Label ?? "宿舍电费助手";
         _tipRows = new List<WidgetTip.Row>
         {
             new("剩余电量", _remaining is { } rem ? $"{rem:0.00} 度" : "--",
@@ -314,7 +381,7 @@ internal sealed class TaskbarWidget : Form
 
         Measure();
         Reposition();
-        Invalidate();
+        Render();
     }
 
     /// <summary>
@@ -367,16 +434,37 @@ internal sealed class TaskbarWidget : Form
     private const int PadX = 8;
     private const int ColGap = 16;
     private const int RowGap = 1;
-    private const TextFormatFlags TextFlags =
-        TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.VerticalCenter;
+
+    /// <summary>
+    /// 量字画字都走 GDI+ 这一套排版参数。<b>不能用 <c>TextRenderer</c></b>——那条路是 GDI 画的，
+    /// 出来的像素 alpha 一律是 0，推给分层窗口就是一片透明，什么都看不见。
+    /// 量和画共用同一套度量，排版才不会一边量宽一边画窄。
+    /// </summary>
+    private static readonly StringFormat Fmt = new(StringFormat.GenericTypographic)
+    {
+        FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip
+                      | StringFormatFlags.MeasureTrailingSpaces,
+        Alignment = StringAlignment.Near,
+        LineAlignment = StringAlignment.Center,
+        Trimming = StringTrimming.None,
+    };
+
+    // 量字用的一张 1×1 画布：窗口位图还没建起来的时候（启动、重新定尺寸）也得量得出来
+    private static readonly Bitmap RulerPad = new(1, 1);
+    private static readonly Graphics Ruler = Graphics.FromImage(RulerPad);
 
     /// <summary>一格读数：灰色小标签 + 彩色数字 + 灰色单位。</summary>
     private readonly record struct Cell(string Label, string Value, string Unit, Color Color);
 
-    private bool DarkBg => _bg.GetBrightness() < 0.5f;
-    private Color MainColor => DarkBg ? Color.FromArgb(0xEC, 0xEF, 0xF4) : Color.FromArgb(0x1B, 0x1E, 0x25);
-    private Color SubColor => DarkBg ? Color.FromArgb(0x9B, 0xA3, 0xB2) : Color.FromArgb(0x5C, 0x62, 0x6C);
-    private Color AccentColor => DarkBg ? Theme.Accent : Color.FromArgb(0x18, 0x5A, 0xC8);
+    private Color MainColor => _light ? Color.FromArgb(0x1B, 0x1E, 0x25) : Color.FromArgb(0xEC, 0xEF, 0xF4);
+    private Color SubColor => _light ? Color.FromArgb(0x4B, 0x51, 0x5C) : Color.FromArgb(0x9B, 0xA3, 0xB2);
+    private Color AccentColor => _light ? Color.FromArgb(0x18, 0x5A, 0xC8) : Theme.Accent;
+
+    /// <summary>
+    /// 字底下描的那圈淡影。底下是真透明的，任务栏什么颜色、半透明透出来什么壁纸都说不准，
+    /// 描一圈反色的影子才不至于跟背景糊在一起。
+    /// </summary>
+    private Color HaloColor => _light ? Color.FromArgb(170, 255, 255, 255) : Color.FromArgb(150, 0, 0, 0);
 
     private Color RemainColor
     {
@@ -384,7 +472,7 @@ internal sealed class TaskbarWidget : Form
         {
             if (_remaining is null || _error is not null) return SubColor;
             Color c = Theme.LevelColor(_remaining, _cfg.LowThreshold);
-            return DarkBg ? c : Theme.Mix(c, Color.Black, 0.3f); // 浅色任务栏上要压暗一点才看得清
+            return _light ? Theme.Mix(c, Color.Black, 0.3f) : c; // 浅色任务栏上要压暗一点才看得清
         }
     }
 
@@ -409,8 +497,11 @@ internal sealed class TaskbarWidget : Form
             ? $"{(_remaining is { } r ? r.ToString("0.00") : "--")}度 {t:MM-dd HH:mm}"
             : $"{(_remaining is { } r2 ? r2.ToString("0.00") : "--")}度";
 
-    private int MeasureV(string s) => TextRenderer.MeasureText(s, _fontValue!, Size.Empty, TextFlags).Width;
-    private int MeasureL(string s) => TextRenderer.MeasureText(s, _fontLabel!, Size.Empty, TextFlags).Width;
+    private static int Wide(string s, Font f) =>
+        s.Length == 0 ? 0 : (int)Math.Ceiling(Ruler.MeasureString(s, f, PointF.Empty, Fmt).Width);
+
+    private int MeasureV(string s) => Wide(s, _fontValue!);
+    private int MeasureL(string s) => Wide(s, _fontLabel!);
 
     private int CellWidth(Cell c) =>
         MeasureL(c.Label) + 5 + MeasureV(c.Value) + (c.Unit.Length > 0 ? 2 + MeasureL(c.Unit) : 0);
@@ -432,104 +523,135 @@ internal sealed class TaskbarWidget : Form
         }
     }
 
-    private static Color FallbackBack() =>
-        Theme.SystemUsesLightTheme() ? Color.FromArgb(0xF3, 0xF3, 0xF3) : Color.FromArgb(0x20, 0x20, 0x20);
-
-    /// <summary>
-    /// 取任务栏自己的底色：在组件右边空白处采两个点，两点一样就认为那是背景色。
-    /// 采不到（或那儿有图标）就退回按系统主题猜一个。
-    /// </summary>
-    private void RefreshBackColor()
+    /// <summary>系统主题两秒对一次：字的深浅跟着它走，任务栏本来也是跟着它变的。</summary>
+    private void RefreshTheme()
     {
-        if ((DateTime.UtcNow - _bgChecked).TotalSeconds < 2) return;
-        _bgChecked = DateTime.UtcNow;
+        if ((DateTime.UtcNow - _lightChecked).TotalSeconds < 2) return;
+        _lightChecked = DateTime.UtcNow;
 
-        Color bg = FallbackBack();
-        Rectangle me = ScreenRect();
-        if (!_away && me.Width > 0
-            && Win32.IsWindow(_taskbar)
-            && Win32.GetWindowRect(_taskbar, out RECT tb)
-            && Win32.GetClientRect(_taskbar, out RECT c))
-        {
-            // GetPixel 要的是任务栏客户区坐标，组件这边是屏幕坐标，减掉任务栏左上角就行
-            int y = Math.Clamp(me.Top + me.Height / 2 - tb.Top, 0, Math.Max(0, c.Height - 1));
-            int x1 = me.Right - tb.Left + 20, x2 = x1 + 24;
-            if (x1 >= 0 && x2 < c.Width - 2
-                && Win32.SampleColor(_taskbar, x1, y) is { } s1
-                && Win32.SampleColor(_taskbar, x2, y) is { } s2
-                && s1.ToArgb() == s2.ToArgb()
-                // 纯黑基本都是"这块没画在这个 DC 上"，不是真的任务栏颜色
-                && (s1.R | s1.G | s1.B) != 0)
-            {
-                bg = s1;
-            }
-        }
-
-        if (bg.ToArgb() == _bg.ToArgb()) return;
-        _bg = bg;
-        Invalidate();
+        bool light = Theme.SystemUsesLightTheme();
+        if (light == _light) return;
+        _light = light;
+        Render();
     }
 
+    /// <summary>
+    /// 把这一帧整块推给系统。分层窗口的画面不靠 WM_PAINT——推一次就存在 DWM 那边，
+    /// 别的窗口在上面画多少下都擦不掉，也就没有"闪一下没了、切个窗口才回来"那回事。
+    /// 内容、尺寸、主题变了才推一次，平时一帧都不多画。
+    /// </summary>
+    private void Render()
+    {
+        if (_frozen) { Invalidate(); return; }   // 出图那条路是普通窗口，走 OnPaint
+        if (!IsHandleCreated || Width <= 0 || Height <= 0) return;
+
+        if (_surface is null || _surface.Width != Width || _surface.Height != Height)
+        {
+            _surface?.Dispose();
+            _surface = new Bitmap(Width, Height, PixelFormat.Format32bppPArgb);
+        }
+
+        using (Graphics g = Graphics.FromImage(_surface))
+        {
+            // 整块铺一层 alpha=1：肉眼看不见（255 分之一的黑），但分层窗口是按 alpha 判定
+            // 鼠标命中的，真全透明的话只有笔画上点得中，左键和右键菜单就等于没了
+            g.Clear(Color.FromArgb(1, 0, 0, 0));
+            Draw(g, Width, Height);
+        }
+
+        Win32.PushLayered(Handle, _surface);
+    }
+
+    /// <summary>尺寸一变那张位图就得重做：尺寸对不上，系统直接不认。</summary>
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        Render();
+    }
+
+    /// <summary>
+    /// 只有出图（<see cref="DevFreeze"/>）才走到这里：那时窗口是普通窗口，得自己铺个底，
+    /// 不然 PNG 上一片透明，看不出这几个字在任务栏上是什么样。
+    /// </summary>
     protected override void OnPaint(PaintEventArgs e)
     {
-        Graphics g = e.Graphics;
-        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-        g.Clear(_bg);
+        if (!_frozen) return;
+        e.Graphics.Clear(_light ? Color.FromArgb(0xF3, 0xF3, 0xF3) : Color.FromArgb(0x20, 0x20, 0x20));
+        Draw(e.Graphics, Width, Height);
+    }
 
-        if (_fontValue is null || _fontLabel is null) BuildFonts(Math.Max(18, Height));
+    /// <summary>画内容本身：左边一条竖色块 + 一两列读数 + 右上角的状态点。底是调用方铺的。</summary>
+    private void Draw(Graphics g, int w, int h)
+    {
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        // ClearType 得有一块不透明的底才算得出来，这边只能用灰度反锯齿
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+
+        if (_fontValue is null || _fontLabel is null) BuildFonts(Math.Max(18, h));
 
         // 最左边一条细色块，电量见底时就是红的，扫一眼就知道
         using (var bar = new SolidBrush(RemainColor))
-        using (var path = Theme.RoundedRect(new RectangleF(1, Height * 0.22f, 2.5f, Height * 0.56f), 1.25f))
+        using (var path = Theme.RoundedRect(new RectangleF(1, h * 0.22f, 2.5f, h * 0.56f), 1.25f))
             g.FillPath(bar, path);
 
-        int x = PadX;
-        if (Height >= 30)
+        float x = PadX;
+        if (h >= 30)
         {
-            int lineH = Math.Max(
-                TextRenderer.MeasureText("0度", _fontValue!, Size.Empty, TextFlags).Height,
-                TextRenderer.MeasureText("剩", _fontLabel!, Size.Empty, TextFlags).Height);
-            int top = Math.Max(0, (Height - (lineH * 2 + RowGap)) / 2);
+            int lineH = (int)Math.Ceiling(Math.Max(_fontValue!.GetHeight(g), _fontLabel!.GetHeight(g)));
+            float top = Math.Max(0f, (h - (lineH * 2 + RowGap)) / 2f);
 
             List<Cell> c1 = Column1();
-            int w1 = c1.Max(CellWidth);
             DrawCell(g, c1[0], x, top, lineH);
             DrawCell(g, c1[1], x, top + lineH + RowGap, lineH);
 
             if (Column2() is { } c2)
             {
-                x += w1 + ColGap;
+                x += c1.Max(CellWidth) + ColGap;
                 DrawCell(g, c2[0], x, top, lineH);
                 DrawCell(g, c2[1], x, top + lineH + RowGap, lineH);
             }
         }
         else
         {
-            TextRenderer.DrawText(g, OneLineText, _fontValue!,
-                new Rectangle(x, 0, Math.Max(10, Width - x), Height), RemainColor, TextFlags);
+            Glyph(g, OneLineText, _fontValue!, new RectangleF(x, 0, Math.Max(10f, w - x), h), RemainColor);
         }
 
-        if (_error is not null)
-            using (var dot = new SolidBrush(Theme.Bad))
-                g.FillEllipse(dot, Width - 7, 3, 4, 4);
-        else if (_busy)
-            using (var dot = new SolidBrush(AccentColor))
-                g.FillEllipse(dot, Width - 7, 3, 4, 4);
+        if (_error is not null || _busy)
+            using (var dot = new SolidBrush(_error is not null ? Theme.Bad : AccentColor))
+                g.FillEllipse(dot, w - 7, 3, 4, 4);
     }
 
-    private void DrawCell(Graphics g, Cell c, int x, int top, int lineH)
+    private void DrawCell(Graphics g, Cell c, float x, float top, int lineH)
     {
         int lw = MeasureL(c.Label);
-        TextRenderer.DrawText(g, c.Label, _fontLabel!, new Rectangle(x, top, lw + 2, lineH), SubColor, TextFlags);
+        Glyph(g, c.Label, _fontLabel!, new RectangleF(x, top, lw + 2, lineH), SubColor);
 
-        int vx = x + lw + 5;
+        float vx = x + lw + 5;
         int vw = MeasureV(c.Value);
-        TextRenderer.DrawText(g, c.Value, _fontValue!, new Rectangle(vx, top, vw + 2, lineH), c.Color, TextFlags);
+        Glyph(g, c.Value, _fontValue!, new RectangleF(vx, top, vw + 2, lineH), c.Color);
 
         if (c.Unit.Length > 0)
-            TextRenderer.DrawText(g, c.Unit, _fontLabel!,
-                new Rectangle(vx + vw + 2, top, MeasureL(c.Unit) + 2, lineH), SubColor, TextFlags);
+            Glyph(g, c.Unit, _fontLabel!,
+                new RectangleF(vx + vw + 2, top, MeasureL(c.Unit) + 2, lineH), SubColor);
+    }
+
+    private static readonly PointF[] Halo = { new(-1, 0), new(1, 0), new(0, -1), new(0, 1) };
+
+    /// <summary>
+    /// 一段字：先在四周描一圈反色淡影，再把字本身压上去。字底下是真透明的，
+    /// 任务栏什么色、半透明透出来什么壁纸都说不准，光靠字自己的颜色总会有糊掉的时候。
+    /// </summary>
+    private void Glyph(Graphics g, string s, Font f, RectangleF box, Color c)
+    {
+        if (s.Length == 0) return;
+
+        using (var halo = new SolidBrush(HaloColor))
+            foreach (PointF d in Halo)
+                g.DrawString(s, f, halo,
+                    new RectangleF(box.X + d.X, box.Y + d.Y, box.Width, box.Height), Fmt);
+
+        using var ink = new SolidBrush(c);
+        g.DrawString(s, f, ink, box, Fmt);
     }
 
     protected override void OnMouseDown(MouseEventArgs e)
@@ -573,6 +695,7 @@ internal sealed class TaskbarWidget : Form
             _keeper.Dispose();
             UnhookForeground();
             _tip.Dispose();
+            _surface?.Dispose();
             _fontValue?.Dispose();
             _fontLabel?.Dispose();
         }

@@ -11,6 +11,12 @@ internal struct RECT
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal struct POINT
+{
+    public int X, Y;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 internal struct APPBARDATA
 {
     public uint cbSize;
@@ -36,13 +42,12 @@ internal static class Win32
 
     public const int WS_EX_TOOLWINDOW = 0x00000080;
     public const int WS_EX_NOACTIVATE = 0x08000000;
-    public const int WS_EX_TOPMOST = 0x00000008;
     public const int WS_EX_TRANSPARENT = 0x00000020;
     public const int WS_EX_COMPOSITED = 0x02000000;
+    public const int WS_EX_LAYERED = 0x00080000;
 
     public const uint SWP_NOSIZE = 0x0001;
     public const uint SWP_NOMOVE = 0x0002;
-    public const uint SWP_NOZORDER = 0x0004;
     public const uint SWP_NOACTIVATE = 0x0010;
 
     public static readonly IntPtr HWND_TOP = IntPtr.Zero;
@@ -53,15 +58,9 @@ internal static class Win32
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern IntPtr FindWindow(string? lpClassName, string? lpWindowName);
 
-    [DllImport("user32.dll")]
-    public static extern bool IsWindow(IntPtr hWnd);
-
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
         int X, int Y, int cx, int cy, uint uFlags);
-
-    [DllImport("user32.dll")]
-    public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
 
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
@@ -164,15 +163,17 @@ internal static class Win32
     [DllImport("user32.dll")]
     private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
 
-    [DllImport("gdi32.dll")]
-    private static extern uint GetPixel(IntPtr hdc, int x, int y);
+    [DllImport("user32.dll")]
+    private static extern IntPtr WindowFromPoint(POINT pt);
+
+    /// <summary>屏幕上这一点归哪个窗口。分层窗口按 alpha 判定：透明的地方点不到。</summary>
+    public static IntPtr WindowAt(Point p) => WindowFromPoint(new POINT { X = p.X, Y = p.Y });
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 
     private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
     private const int DWMWA_BORDER_COLOR = 34;
-    private const uint CLR_INVALID = 0xFFFFFFFF;
 
     /// <summary>标题栏跟着深色主题走，省得白底标题栏很突兀。</summary>
     public static void UseDarkTitleBar(IntPtr hWnd, Color? border = null)
@@ -193,20 +194,83 @@ internal static class Win32
         }
     }
 
-    /// <summary>取窗口客户区某点的颜色，用来让组件底色跟任务栏一致。取不到返回 null。</summary>
-    public static Color? SampleColor(IntPtr hWnd, int x, int y)
+    // ---------- 分层窗口：整块位图连 alpha 一起交给系统合成 ----------
+
+    private const int ULW_ALPHA = 0x02;
+    private const byte AC_SRC_OVER = 0x00;
+    private const byte AC_SRC_ALPHA = 0x01;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SIZE
     {
-        IntPtr dc = GetDC(hWnd);
-        if (dc == IntPtr.Zero) return null;
+        public int Cx, Cy;
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    private struct BLENDFUNCTION
+    {
+        public byte BlendOp, BlendFlags, SourceConstantAlpha, AlphaFormat;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UpdateLayeredWindow(IntPtr hWnd, IntPtr hdcDst, IntPtr pptDst,
+        ref SIZE psize, IntPtr hdcSrc, ref POINT pptSrc, int crKey,
+        ref BLENDFUNCTION pblend, int dwFlags);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteDC(IntPtr hdc);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr SelectObject(IntPtr hdc, IntPtr h);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteObject(IntPtr h);
+
+    /// <summary>
+    /// 把一张带 alpha 的位图整块推给分层窗口（<c>WS_EX_LAYERED</c> + <c>UpdateLayeredWindow</c>）。
+    ///
+    /// 好处有两个：一是没画到的地方是<b>真透明</b>，不用去猜背景该填什么色；二是画面存在
+    /// 系统（DWM）那边，别的窗口在上面重画不会把它擦掉——不像普通窗口那样得等 WM_PAINT
+    /// 才补回来，也就没有"闪一下没了、切个窗口又回来"的毛病。
+    ///
+    /// 位置和大小仍旧由 <see cref="SetWindowPos"/> 管，这里只换内容。
+    /// </summary>
+    public static bool PushLayered(IntPtr hWnd, Bitmap bmp)
+    {
+        IntPtr screen = GetDC(IntPtr.Zero);
+        if (screen == IntPtr.Zero) return false;
+
+        IntPtr mem = CreateCompatibleDC(screen);
+        IntPtr hbm = IntPtr.Zero, old = IntPtr.Zero;
         try
         {
-            uint v = GetPixel(dc, x, y);
-            if (v == CLR_INVALID) return null;
-            return Color.FromArgb((int)(v & 0xFF), (int)((v >> 8) & 0xFF), (int)((v >> 16) & 0xFF));
+            if (mem == IntPtr.Zero) return false;
+
+            hbm = bmp.GetHbitmap(Color.FromArgb(0));
+            old = SelectObject(mem, hbm);
+
+            var src = new POINT();
+            var size = new SIZE { Cx = bmp.Width, Cy = bmp.Height };
+            var blend = new BLENDFUNCTION
+            {
+                BlendOp = AC_SRC_OVER,
+                BlendFlags = 0,
+                SourceConstantAlpha = 255,
+                AlphaFormat = AC_SRC_ALPHA,
+            };
+
+            return UpdateLayeredWindow(hWnd, screen, IntPtr.Zero, ref size,
+                mem, ref src, 0, ref blend, ULW_ALPHA);
         }
         finally
         {
-            ReleaseDC(hWnd, dc);
+            if (old != IntPtr.Zero) SelectObject(mem, old);
+            if (hbm != IntPtr.Zero) DeleteObject(hbm);
+            if (mem != IntPtr.Zero) DeleteDC(mem);
+            ReleaseDC(IntPtr.Zero, screen);
         }
     }
 
@@ -220,7 +284,7 @@ internal static class Win32
     public static IntPtr FindTaskbar() => FindWindow("Shell_TrayWnd", null);
 
     /// <summary>任务栏在屏幕上的位置和停靠边。失败时返回 false。</summary>
-    public static bool TryGetTaskbarPos(out RECT rect, out TaskbarEdge edge)
+    private static bool TryGetTaskbarPos(out RECT rect, out TaskbarEdge edge)
     {
         var data = new APPBARDATA { cbSize = (uint)Marshal.SizeOf<APPBARDATA>() };
         if (SHAppBarMessage(ABM_GETTASKBARPOS, ref data) != IntPtr.Zero)

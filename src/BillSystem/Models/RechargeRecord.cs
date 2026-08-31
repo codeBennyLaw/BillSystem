@@ -30,6 +30,10 @@ public sealed class RechargeRecord
     [JsonIgnore]
     public double Yuan => PayCent / 100.0;
 
+    /// <summary>这一笔充进来多少度（金额 ÷ <see cref="AppConfig.PricePerKwh"/>）。</summary>
+    [JsonIgnore]
+    public double Kwh => AppConfig.KwhOf(Yuan);
+
     [JsonIgnore]
     public string MethodLabel => PayMethod == "card" ? "学生卡" : "扫码充值";
 

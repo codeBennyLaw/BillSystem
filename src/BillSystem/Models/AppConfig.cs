@@ -6,15 +6,37 @@ namespace BillSystem.Models;
 /// <summary>用户配置，存 exe 旁边的 data\config.json。</summary>
 public sealed class AppConfig
 {
-    /// <summary>写死的宿舍：43 栋 422。整个程序只服务这一间，所以没有对应的设置项。</summary>
-    public const int FixedBuilding = 43;
-    public const int FixedRoom = 422;
+    /// <summary>
+    /// 电价：<b>三分之二元一度</b>（0.666…，6 循环），学校定的，界面上改不了。
+    /// 写成 <c>2.0 / 3.0</c> 而不是抄几位 0.6666——小数点后截断会让"充 60 元该进来 90 度"
+    /// 差出零点几度，柱子和记录里的度数都跟着偏。
+    /// </summary>
+    public const double PricePerKwh = 2.0 / 3.0;
 
-    [JsonIgnore]
-    public int Building => FixedBuilding;
+    /// <summary>钱换成度。</summary>
+    public static double KwhOf(double yuan) => yuan / PricePerKwh;
 
+    /// <summary>度换成钱。</summary>
+    public static double YuanOf(double kwh) => kwh * PricePerKwh;
+
+    // ---------- 宿舍 ----------
+
+    /// <summary>
+    /// 要记录的宿舍，<b>默认空</b>：第一次打开先到设置里把自己的楼栋房号加进来。
+    /// 每一间各有自己的一对 jsonl，全部一起轮询，主界面上切换看哪一间。
+    /// </summary>
+    public List<Dorm> Dorms { get; set; } = new();
+
+    /// <summary>主界面正在看哪一间，存 <see cref="Dorm.Key"/>——按序号存的话，删掉一间就串位了。</summary>
+    public string CurrentDorm { get; set; } = "";
+
+    /// <summary>当前那一间；一间都没加时是 null，界面上会提示先去设置里加。</summary>
     [JsonIgnore]
-    public int Room => FixedRoom;
+    public Dorm? Current => Dorms.Count == 0
+        ? null
+        : Dorms.FirstOrDefault(d => d.Key == CurrentDorm) ?? Dorms[0];
+
+    // ---------- 任务栏组件 ----------
 
     public bool ShowWidget { get; set; } = true;
 
@@ -24,40 +46,26 @@ public sealed class AppConfig
     /// <summary>组件距任务栏左边缘的像素偏移。</summary>
     public int WidgetOffsetX { get; set; } = 4;
 
-    public bool LowAlertEnabled { get; set; } = true;
+    // ---------- 低电量提醒 ----------
+
+    /// <summary>剩余电量低于这么多度就提醒。</summary>
     public double LowThreshold { get; set; } = 10;
 
     /// <summary>
-    /// 另一条提醒线：照眼下的日均算，预计可用低于这么多天就提醒（默认半天）。
-    /// 度数还在阈值以上也发——空调一开日均能翻几倍，等跌到阈值可能已经半夜断电了。
-    /// 调到 0 就是不看这一条，只看度数阈值。
+    /// 另一条提醒线：照眼下的日均算，预计可用低于这么多天就提醒。
+    /// 度数还在阈值以上也提醒——空调一开日均能翻几倍，等跌到阈值可能已经半夜断电了。
+    /// <b>默认 0，也就是不看这一条</b>，只看度数阈值。
     /// </summary>
-    public double LowDaysThreshold { get; set; } = 0.5;
+    public double LowDaysThreshold { get; set; }
 
-    // ---------- 低电量邮件提醒（QQ 邮箱 SMTP） ----------
-
-    /// <summary>发件地址写死：就用这个 QQ 邮箱发，界面上改不了。</summary>
-    public const string FixedMailFrom = "1018273986@qq.com";
-
-    /// <summary>收件地址也写死，两个都收同一封（抄送不分主次，都放在收件人里）。</summary>
-    public static readonly string[] FixedMailTo =
-    {
-        "alilexiwalker@wyu.edu.cn",
-        "3124002500@wyu.edu.cn",
-    };
-
-    [JsonIgnore]
-    public string MailFrom => FixedMailFrom;
-
-    [JsonIgnore]
-    public IReadOnlyList<string> MailTo => FixedMailTo;
-
-    /// <summary>收件人连成一行，界面和邮件正文里显示用。</summary>
-    public static string MailToLine => string.Join("、", FixedMailTo);
+    /// <summary>
+    /// 发件的 QQ 邮箱地址。<b>所有宿舍共用这一个发件箱</b>（一个授权码只对应一个邮箱），
+    /// 收件人是按间配的，见 <see cref="Dorm.MailTo"/>；发件人显示名写的是对应那间的房号。
+    /// </summary>
+    public string MailFrom { get; set; } = "";
 
     /// <summary>
     /// QQ 邮箱的 SMTP <b>授权码</b>（不是 QQ 密码，在邮箱设置→账号里单独生成）。
-    /// 填了就发邮件，没填就只发系统通知——所以邮件提醒没有单独的开关。
     /// 明文存在 config.json 里——本程序不引第三方包，也没有可用的本机加密接口。
     /// </summary>
     public string MailAuthCode { get; set; } = "";
@@ -73,7 +81,19 @@ public sealed class AppConfig
     /// 装在没有写权限的目录里时退回 %APPDATA%\BillSystem。
     /// </summary>
     [JsonIgnore]
-    public static string DataDir { get; } = ResolveDataDir();
+    public static string DataDir => _dataDir ??= ResolveDataDir();
+
+    private static string? _dataDir;
+
+    /// <summary>
+    /// 自检和出图用：把数据目录挪到一个单独的沙盒，用户真实的 jsonl 和 config.json 一个字都不碰。
+    /// 得在任何存储建起来之前调用（<see cref="Program"/> 里那两个开关就是最早的时机）。
+    /// </summary>
+    internal static void UseSandbox(string dir)
+    {
+        Directory.CreateDirectory(dir);
+        _dataDir = dir;
+    }
 
     [JsonIgnore]
     public static string ConfigPath => Path.Combine(DataDir, "config.json");
@@ -152,27 +172,43 @@ public sealed class AppConfig
         }
     }
 
-    private void Normalize()
+    internal void Normalize()
     {
+        // 房号填错、同一间加了两次，都在这儿收拾掉
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        Dorms = (Dorms ?? new List<Dorm>()).Where(d => d is not null && d.Valid && seen.Add(d.Key)).ToList();
+        foreach (Dorm d in Dorms) d.Normalize();
+        CurrentDorm = Current?.Key ?? "";
+
         WidgetOffsetX = Math.Clamp(WidgetOffsetX, 0, 2000);
         LowThreshold = Math.Clamp(LowThreshold, 0, 1000);
         LowDaysThreshold = Math.Clamp(LowDaysThreshold, 0, 30);
+
+        MailFrom = (MailFrom ?? "").Trim();
         MailAuthCode = (MailAuthCode ?? "").Trim();
     }
 
-    /// <summary>设置窗口在副本上改，点保存才写回来。</summary>
-    public AppConfig Clone() => (AppConfig)MemberwiseClone();
+    /// <summary>设置窗口在副本上改，点保存才写回来。宿舍得整间复制，不然改的还是同一份。</summary>
+    public AppConfig Clone()
+    {
+        var c = (AppConfig)MemberwiseClone();
+        c.Dorms = Dorms.Select(d => d.Clone()).ToList();
+        return c;
+    }
 
     public void CopyFrom(AppConfig o)
     {
+        Dorms = o.Dorms.Select(d => d.Clone()).ToList();
+        CurrentDorm = o.CurrentDorm;
         ShowWidget = o.ShowWidget;
         WidgetShowExtra = o.WidgetShowExtra;
         WidgetOffsetX = o.WidgetOffsetX;
-        LowAlertEnabled = o.LowAlertEnabled;
         LowThreshold = o.LowThreshold;
         LowDaysThreshold = o.LowDaysThreshold;
+        MailFrom = o.MailFrom;
         MailAuthCode = o.MailAuthCode;
         StartWithWindows = o.StartWithWindows;
         Granularity = o.Granularity;
+        Normalize();
     }
 }

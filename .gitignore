@@ -31,3 +31,11 @@ billsystem-selftest.txt
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# ---------- 打包产物 ----------
+# publish.bat 出来的自带运行时的整包（一百多兆），压成 zip 传 Release，不进库
+publish/
+
+# --selftest / --screenshot 各自的沙盒数据目录（都是假数据，跟着 exe 旁边生成）
+dev-selftest/
+dev-devshot/

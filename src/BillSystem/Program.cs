@@ -1,3 +1,4 @@
+using BillSystem.Dev;
 using BillSystem.Models;
 using BillSystem.Services;
 using BillSystem.UI;
@@ -11,6 +12,7 @@ internal static class Program
     {
         if (args.Any(a => a.Equals("--selftest", StringComparison.OrdinalIgnoreCase)))
         {
+            AppConfig.UseSandbox(Sandbox("selftest"));
             Environment.ExitCode = SelfTest.Run();
             return;
         }
@@ -19,6 +21,7 @@ internal static class Program
         if (shot >= 0)
         {
             ApplicationConfiguration.Initialize();
+            AppConfig.UseSandbox(Sandbox("devshot"));
             string dir = shot + 1 < args.Length && !args[shot + 1].StartsWith('-')
                 ? args[shot + 1]
                 : Path.Combine(Path.GetTempPath(), "billsystem-shots");
@@ -44,6 +47,24 @@ internal static class Program
 
         bool silent = args.Any(a => a.Equals("--tray", StringComparison.OrdinalIgnoreCase));
         Application.Run(new TrayContext(silent));
+    }
+
+    /// <summary>
+    /// 自检 / 出图各用一个空数据目录，摆在 exe 旁边（截图里不会带上用户名），每次跑之前清一遍。
+    /// 有了它，这两个开关碰不到用户真实的 jsonl 和 config.json。
+    /// </summary>
+    private static string Sandbox(string what)
+    {
+        string dir = Path.Combine(AppContext.BaseDirectory, "dev-" + what);
+        try
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+        }
+        catch
+        {
+            // 清不掉就接着用，反正里头都是假数据
+        }
+        return dir;
     }
 
     private static void Crash(Exception? ex)

@@ -3,7 +3,7 @@ using System.Text.Json;
 using BillSystem.Models;
 using BillSystem.Services;
 
-namespace BillSystem;
+namespace BillSystem.Dev;
 
 /// <summary>
 /// 开发用自检：<c>BillSystem.exe --selftest</c>，结果写到 %TEMP%\billsystem-selftest.txt。
@@ -111,6 +111,23 @@ internal static class SelfTest
         Check("SlotOf 差 5 分钟内算下一格",
             Reading.SlotOf(new DateTime(2026, 8, 20, 3, 56, 0)) == day.AddHours(4));
 
+        // ---------- 轮询节奏：整点和半点各一次，半点落回本整点那一格 ----------
+
+        Check("整点过后等到半点",
+            PollService.NextDelay(new DateTime(2026, 8, 20, 3, 0, 0)) == TimeSpan.FromMinutes(30),
+            PollService.NextDelay(new DateTime(2026, 8, 20, 3, 0, 0)).ToString());
+        Check("半点前等到半点",
+            PollService.NextDelay(new DateTime(2026, 8, 20, 3, 5, 0)) == TimeSpan.FromMinutes(25));
+        Check("半点过后等到下一个整点",
+            PollService.NextDelay(new DateTime(2026, 8, 20, 3, 30, 0)) == TimeSpan.FromMinutes(30));
+        Check("快到整点时等到整点",
+            PollService.NextDelay(new DateTime(2026, 8, 20, 3, 59, 0)) == TimeSpan.FromMinutes(1));
+        Check("早醒几十毫秒也不空转",
+            PollService.NextDelay(new DateTime(2026, 8, 20, 3, 29, 59, 950))
+                >= TimeSpan.FromMilliseconds(200));
+        Check("半点那次归本整点",
+            Reading.SlotOf(new DateTime(2026, 8, 20, 3, 30, 0)) == day.AddHours(3));
+
         // 漏采（程序没开）的那几个小时：增量按时间比例摊回去，不是全压在最后一格
         var skipped = new List<Reading> { R(day.AddHours(2), 200, 40), R(day.AddHours(5), 203, 37) };
         List<Bucket> spread = UsageAggregator.Build(skipped, Granularity.Hour, day.AddHours(2), day.AddHours(6));
@@ -151,38 +168,93 @@ internal static class SelfTest
         Check("半格分到三分之一度", Math.Abs(part[1].Usage - 1.0 / 3) < 1e-9,
             part[1].Usage.ToString("0.####"));
 
+        // ---------- 电价换算 ----------
+
+        Check("一度三分之二元（0.666…）", Math.Abs(AppConfig.PricePerKwh - 2.0 / 3.0) < 1e-12,
+            AppConfig.PricePerKwh.ToString("0.########"));
+        Check("2 元换 3 度", Math.Abs(AppConfig.KwhOf(2) - 3) < 1e-9,
+            AppConfig.KwhOf(2).ToString("0.####"));
+        Check("60 元换 90 度", Math.Abs(AppConfig.KwhOf(60) - 90) < 1e-9,
+            AppConfig.KwhOf(60).ToString("0.####"));
+        Check("3 度换 2 元", Math.Abs(AppConfig.YuanOf(3) - 2) < 1e-9);
+        Check("换过去再换回来还是原数", Math.Abs(AppConfig.YuanOf(AppConfig.KwhOf(37.5)) - 37.5) < 1e-9);
+        Check("一笔充值折得出度数",
+            Math.Abs(new RechargeRecord { PayCent = 6000 }.Kwh - 90) < 1e-9,
+            new RechargeRecord { PayCent = 6000 }.Kwh.ToString("0.####"));
+
         // ---------- 充值标在剩余电量涨上去的那一格 ----------
 
         var afterPay = new List<Reading>
         {
             R(day.AddHours(1), 100, 10),
             R(day.AddHours(2), 101, 9),
-            R(day.AddHours(3), 102, 39),   // 充进来 30 度
+            R(day.AddHours(3), 102, 99),   // 充进来 90 度（60 元 ÷ ⅔）
         };
         var paid = new List<RechargeRecord>
         {
-            new() { OrderCode = "P1", PayTime = day.AddHours(2).AddMinutes(30), PayCent = 3000 },
+            new() { OrderCode = "P1", PayTime = day.AddHours(2).AddMinutes(30), PayCent = 6000 },
         };
         List<Bucket> marked = UsageAggregator.Build(
             afterPay, Granularity.Hour, day.AddHours(1), day.AddHours(5), paid);
         Check("充值标在剩余涨上去那一格", marked[1].Recharged && !marked[0].Recharged,
             string.Join(",", marked.Select(b => b.RechargeYuan.ToString("0.#"))));
-        Check("那一格记的是 30 元", Math.Abs(marked[1].RechargeYuan - 30) < 1e-9);
+        Check("那一格记的是 60 元", Math.Abs(marked[1].RechargeYuan - 60) < 1e-9);
+        Check("那一格折合 90 度", Math.Abs(marked[1].RechargeKwh - 90) < 1e-9,
+            marked[1].RechargeKwh.ToString("0.####"));
         Check("没充值的格子不标",
             marked.Where((_, i) => i != 1).All(b => !b.Recharged));
         Check("不给充值记录也照样画得出来",
             UsageAggregator.Build(afterPay, Granularity.Hour, day.AddHours(1), day.AddHours(5))
                 .All(b => !b.Recharged));
-        Check("月粒度不标充值",
-            UsageAggregator.Build(afterPay, Granularity.Month,
-                    new DateTime(2026, 8, 1), new DateTime(2026, 9, 1), paid)
-                .All(b => !b.Recharged));
+        List<Bucket> byMonth = UsageAggregator.Build(afterPay, Granularity.Month,
+            new DateTime(2026, 8, 1), new DateTime(2026, 9, 1), paid);
+        Check("月粒度也标充值", byMonth.Count == 1 && Math.Abs(byMonth[0].RechargeYuan - 60) < 1e-9,
+            byMonth[0].RechargeYuan.ToString("0.#"));
+        List<Bucket> byYear = UsageAggregator.Build(afterPay, Granularity.Year,
+            new DateTime(2026, 1, 1), new DateTime(2027, 1, 1), paid);
+        Check("年粒度也标充值", byYear.Count == 1 && Math.Abs(byYear[0].RechargeKwh - 90) < 1e-9,
+            byYear[0].RechargeKwh.ToString("0.#"));
+
+        // 同一格里又用掉一些电：净涨幅只有 81 度，但绿柱子该画满 90 度那一截
+        var payAndUse = new List<Reading>
+        {
+            R(day.AddHours(1), 100, 10),
+            R(day.AddHours(2), 101, 9),
+            R(day.AddHours(3), 110, 90),
+        };
+        List<Bucket> eaten = UsageAggregator.Build(
+            payAndUse, Granularity.Hour, day.AddHours(1), day.AddHours(5), paid);
+        Check("充完又用掉一些也标得对", eaten[1].Recharged, string.Join(",",
+            eaten.Select(b => b.RechargeKwh.ToString("0.#"))));
+        Check("折合度数按金额算，不按净涨幅",
+            Math.Abs(eaten[1].RechargeKwh - 90) < 1e-9
+            && eaten[1].Remaining is { } er && Math.Abs(er - 90) < 1e-6,
+            eaten[1].RechargeKwh.ToString("0.####"));
+
+        // 付款那一格只是电表修正读数涨了 0.5 度，真的那一跳在下一格：挑涨幅接近应充度数的那格
+        var lateJump = new List<Reading>
+        {
+            R(day.AddHours(1), 100, 10),
+            R(day.AddHours(2), 100, 10),
+            R(day.AddHours(3), 101, 10.5),
+            R(day.AddHours(4), 102, 100),
+        };
+        List<Bucket> late = UsageAggregator.Build(
+            lateJump, Granularity.Hour, day.AddHours(1), day.AddHours(6), paid);
+        Check("小波动骗不走那一笔充值", late[2].Recharged && !late[1].Recharged,
+            string.Join(",", late.Select(b => b.RechargeYuan.ToString("0.#"))));
 
         // 一个整点只留一条：同一格再来一次是覆盖，不是新增
         CheckStore(Check);
 
         // 充值记录：文件正序、内存倒序
         CheckRechargeStore(Check);
+
+        // 配置、宿舍名单、按间配的提醒
+        CheckConfig(Check);
+
+        // 数据目录里"没在记录名单里"的那些文件
+        CheckOrphans(Check);
 
         // 真实返回样本
         const string sample = """
@@ -230,7 +302,7 @@ internal static class SelfTest
     }
 
     /// <summary>
-    /// 仓库的整点语义：同一个整点写第二次是覆盖（值变了才返回 true），
+    /// 仓库的整点语义：同一个整点写第二次是覆盖（值变了才返回 true，半点那一次走的就是这条路），
     /// 老数据没有 SlotTime 时按采集时间折算成整点补上。用一对假房号，跑完删文件。
     /// </summary>
     private static void CheckStore(Action<string, bool, string> check)
@@ -253,12 +325,27 @@ internal static class SelfTest
             check("下一个整点是新的一格", store.TryAdd(Mk(slot.AddHours(1), 201.5, 38.5)) && store.Count == 2,
                 store.Count.ToString());
 
+            // 半点那一次查询：SlotTime 空着，按采集时间落回本整点那一格
+            check("半点读数原样不动就什么都不做",
+                !store.TryAdd(Half(slot.AddHours(1), 201.5, 38.5)) && store.Count == 2,
+                store.Count.ToString());
+            check("半点值变了就顶替掉整点那条",
+                store.TryAdd(Half(slot.AddHours(1), 202, 38)) && store.Count == 2,
+                store.Count.ToString());
+            check("顶替后留下的是半点那条",
+                store.Latest is { } h && Math.Abs(h.Used - 202) < 1e-9
+                && h.SlotTime == slot.AddHours(1),
+                store.Latest?.Used.ToString("0.##") ?? "null");
+
             // 重新载入：文件里那一格有两行，后写的应该赢
             var again = new ReadingStore(997, 9997);
             check("重载后同一格还是一条", again.Count == 2, again.Count.ToString());
             check("重载后留的是后写的那条",
                 again.Snapshot()[0] is { } f && Math.Abs(f.Used - 200.5) < 1e-9,
                 again.Snapshot()[0].Used.ToString("0.##"));
+            check("重载后半点那条也还在",
+                again.Latest is { } h2 && Math.Abs(h2.Used - 202) < 1e-9,
+                again.Latest?.Used.ToString("0.##") ?? "null");
             check("载入时把文件收拢成一格一行", Lines(path) == 2, Lines(path).ToString());
 
             // 老格式：只有 MeterTime / FetchedAt，没有 SlotTime
@@ -281,15 +368,21 @@ internal static class SelfTest
 
     /// <summary>
     /// 提醒邮件的内容：标题要先说触发的那件事，两份正文（纯文本 / HTML）都得带上关键数字，
-    /// 末尾要写清眼下的提醒条件。只查生成出来的文字，不真的发信。
+    /// 末尾要写清眼下的提醒条件。发件人显示名必须是<b>触发那一间</b>的房号（几间共用一个发件箱，
+    /// 收件人靠这行分得清是谁的电快没了）。只查生成出来的文字，不真的发信。
     /// </summary>
     private static void CheckMail(Action<string, bool, string> check, Summary s)
     {
-        var cfg = new AppConfig { LowThreshold = 5, LowDaysThreshold = 0.5 };
+        var cfg = new AppConfig
+        {
+            LowThreshold = 5, LowDaysThreshold = 0.5,
+            MailFrom = "a@qq.com", MailAuthCode = "0123456789abcdef",
+        };
+        var dorm = new Dorm(43, 422) { MailTo = { "me@qq.com", "you@wyu.edu.cn" } };
         Reading r = R(new DateTime(2026, 8, 30, 12, 0, 0), 3352.2, 4.2);
 
-        MailAlert.Letter low = MailAlert.LowLetter(cfg, r, s, true);
-        MailAlert.Letter soon = MailAlert.LowLetter(cfg, r, s, false);
+        MailAlert.Letter low = MailAlert.LowLetter(cfg, dorm, r, s, true);
+        MailAlert.Letter soon = MailAlert.LowLetter(cfg, dorm, r, s, false);
 
         check("两种触发的标题都是那句告急",
             low.Subject == "电量告急！将军救急！" && soon.Subject == low.Subject, low.Subject);
@@ -302,27 +395,155 @@ internal static class SelfTest
         check("末尾写清两个提醒条件",
             low.Text.Contains("剩余低于 5 度，或预计可用不足 0.5 天"), "");
         check("天数调到 0 时只写度数那一条",
-            MailAlert.LowLetter(new AppConfig { LowThreshold = 5, LowDaysThreshold = 0 }, r, s, true)
+            MailAlert.LowLetter(new AppConfig { LowThreshold = 5, LowDaysThreshold = 0 }, dorm, r, s, true)
                 .Text.Contains("提醒条件：剩余低于 5 度。"), "");
         check("HTML 那份也带着度数和抄表时间",
             low.Html.Contains("4.20") && low.Html.Contains("抄表时间"), "");
         check("HTML 没有没闭合的花括号占位",
             !low.Html.Contains('{') && !low.Html.Contains('}'), "");
-        check("测试信带上眼下的数字和收件人",
-            MailAlert.TestLetter(cfg, s) is { } t
+        check("测试信带上眼下的数字和这一间的收件人",
+            MailAlert.TestLetter(cfg, dorm, s) is { } t
             && t.Text.Contains("剩余电量：")
-            && t.Text.Contains(AppConfig.MailToLine), "");
+            && t.Text.Contains(dorm.MailToLine), "");
         check("没有汇总数字时也生成得出来",
-            MailAlert.LowLetter(cfg, r, null, true).Text.Contains("剩余电量：4.20 度"), "");
-        check("发件人显示的是房间号", low.FromName == "43栋422", low.FromName);
+            MailAlert.LowLetter(cfg, dorm, r, null, true).Text.Contains("剩余电量：4.20 度"), "");
+        check("发件人显示的是那一间的房号", low.FromName == "43栋422", low.FromName);
         check("测试信的标题和发件人跟真的那封一样",
-            MailAlert.TestLetter(cfg, s) is { } t2
+            MailAlert.TestLetter(cfg, dorm, s) is { } t2
             && t2.Subject == low.Subject && t2.FromName == low.FromName,
-            $"{MailAlert.TestLetter(cfg, s).Subject} / {MailAlert.TestLetter(cfg, s).FromName}");
+            $"{MailAlert.TestLetter(cfg, dorm, s).Subject} / {MailAlert.TestLetter(cfg, dorm, s).FromName}");
+
+        // 另一间的信写的是另一间的房号和收件人，两间互不相干
+        var other = new Dorm(12, 108) { MailTo = { "other@qq.com" } };
+        MailAlert.Letter otherLow = MailAlert.LowLetter(cfg, other, r, s, true);
+        check("换一间就换发件人", otherLow.FromName == "12栋108", otherLow.FromName);
+        check("信里说的是那一间", otherLow.Text.Contains("12栋108 的剩余电量"), "");
+        check("测试信收件人只列这一间的",
+            MailAlert.TestLetter(cfg, other, s).Text.Contains("other@qq.com")
+            && !MailAlert.TestLetter(cfg, other, s).Text.Contains("me@qq.com"), "");
+
+        // 发得出去的条件是按间算的：共用的发件箱填齐了，还得这一间自己有收件人
+        check("这一间没收件人就发不出去", !MailAlert.Configured(cfg, new Dorm(43, 422)), "");
+        check("填齐了就能发", MailAlert.Configured(cfg, dorm), "");
+        check("没填发件箱谁都发不出去",
+            !MailAlert.Configured(new AppConfig { MailAuthCode = "x" }, dorm), "");
+        check("没填授权码谁都发不出去",
+            !MailAlert.Configured(new AppConfig { MailFrom = "a@qq.com" }, dorm), "");
     }
 
     /// <summary>
-    /// 充值记录：服务器给的是倒序，内存里照倒序摆（界面要"最近一笔在最上面"），
+    /// 配置和宿舍名单：房号认得回来、加重了要去掉、当前那间没了要落回第一间，
+    /// 还有设置窗口拿的那份副本必须是真副本（改副本不能动到正在跑的配置）。
+    /// </summary>
+    private static void CheckConfig(Action<string, bool, string> check)
+    {
+        check("房号拼得出文件名那一段", Dorm.KeyOf(43, 422) == "B43-R422", Dorm.KeyOf(43, 422));
+        check("文件名那一段认得回来",
+            Dorm.Parse("B43-R422") is { Building: 43, Room: 422 }, "");
+        check("认不出来的返回空",
+            Dorm.Parse("readings") is null && Dorm.Parse("B43") is null && Dorm.Parse("BX-RY") is null, "");
+        check("房号超范围不算有效", !new Dorm(0, 422).Valid && !new Dorm(43, 0).Valid, "");
+
+        var cfg = new AppConfig
+        {
+            Dorms =
+            {
+                new Dorm(43, 422) { MailEnabled = true, MailTo = { " me@qq.com ", "me@QQ.com", "" } },
+                new Dorm(43, 422),
+                new Dorm(0, 0),
+                new Dorm(12, 108),
+            },
+            CurrentDorm = "B99-R9",
+            LowThreshold = 5000,
+            LowDaysThreshold = -3,
+        };
+        cfg.Normalize();
+
+        check("同一间只留一份", cfg.Dorms.Count == 2, cfg.Dorms.Count.ToString());
+        check("房号不对的那间被扔掉", cfg.Dorms.All(d => d.Valid), "");
+        check("当前那间不在名单里就落回第一间", cfg.CurrentDorm == "B43-R422", cfg.CurrentDorm);
+        check("收件人去空去重、顺手 trim",
+            cfg.Dorms[0].MailTo.Count == 1 && cfg.Dorms[0].MailTo[0] == "me@qq.com",
+            string.Join("|", cfg.Dorms[0].MailTo));
+        check("阈值夹回范围内",
+            Math.Abs(cfg.LowThreshold - 1000) < 1e-9 && cfg.LowDaysThreshold == 0,
+            $"{cfg.LowThreshold} / {cfg.LowDaysThreshold}");
+
+        // 设置窗口在副本上改，点取消就该什么都没变
+        AppConfig copy = cfg.Clone();
+        copy.Dorms[0].MailTo.Add("new@qq.com");
+        copy.Dorms[0].NotifyEnabled = true;
+        copy.Dorms.Add(new Dorm(7, 701));
+        check("副本加收件人不影响原来那份", cfg.Dorms[0].MailTo.Count == 1,
+            cfg.Dorms[0].MailTo.Count.ToString());
+        check("副本改开关不影响原来那份", !cfg.Dorms[0].NotifyEnabled, "");
+        check("副本加宿舍不影响原来那份", cfg.Dorms.Count == 2, cfg.Dorms.Count.ToString());
+
+        // 点了保存：整份抄回来，宿舍还是各自独立的对象
+        cfg.CopyFrom(copy);
+        check("保存后抄回了新加的那间", cfg.Dorms.Count == 3, cfg.Dorms.Count.ToString());
+        check("保存后抄回了按间配的提醒",
+            cfg.Dorms[0].NotifyEnabled && cfg.Dorms[0].MailTo.Count == 2,
+            string.Join("|", cfg.Dorms[0].MailTo));
+        copy.Dorms[0].MailTo.Clear();
+        check("抄回来之后两份还是分开的", cfg.Dorms[0].MailTo.Count == 2,
+            cfg.Dorms[0].MailTo.Count.ToString());
+
+        // 已经在跑的那间靠这个跟上新设置，不重建、不重读 jsonl
+        var running = new Dorm(43, 422);
+        running.CopyAlertsFrom(cfg.Dorms[0]);
+        check("在跑的那间跟得上新设置",
+            running.NotifyEnabled && running.MailTo.Count == 2, "");
+        running.MailTo.Clear();
+        check("跟上之后收件人也是各自一份", cfg.Dorms[0].MailTo.Count == 2, "");
+    }
+
+    /// <summary>
+    /// 设置里"数据"页那份名单：数据目录里认得出房号的 jsonl，按宿舍归拢，
+    /// <b>已经在记录名单里的不算多余</b>。用一对假房号，只删自己造的那两个文件。
+    /// </summary>
+    private static void CheckOrphans(Action<string, bool, string> check)
+    {
+        string mine = Path.Combine(AppConfig.DataDir, "readings-B995-R9995.jsonl");
+        string strayRead = Path.Combine(AppConfig.DataDir, "readings-B994-R9994.jsonl");
+        string strayPay = Path.Combine(AppConfig.DataDir, "recharges-B994-R9994.jsonl");
+        try
+        {
+            File.WriteAllText(mine, "{}" + Environment.NewLine);
+            File.WriteAllText(strayRead, "{}" + Environment.NewLine + "{}" + Environment.NewLine);
+            File.WriteAllText(strayPay, "{}" + Environment.NewLine);
+
+            var cfg = new AppConfig { Dorms = { new Dorm(995, 9995) } };
+            cfg.Normalize();
+            List<DormFiles> orphans = DormFiles.Orphans(cfg);
+
+            check("在记录名单里的不算多余",
+                orphans.All(f => f.Dorm.Key != "B995-R9995"), "");
+
+            DormFiles? stray = orphans.FirstOrDefault(f => f.Dorm.Key == "B994-R9994");
+            check("名单外的那间列得出来", stray is not null, "");
+            check("同一间的两个文件归到一起", stray?.Paths.Count == 2,
+                stray?.Paths.Count.ToString() ?? "null");
+            check("读数和充值分开数行数",
+                stray is { ReadingLines: 2, RechargeLines: 1 },
+                $"{stray?.ReadingLines} / {stray?.RechargeLines}");
+            check("那一行说明写得出来", stray?.Detail.Contains("2 条读数") == true, stray?.Detail ?? "null");
+
+            check("删掉就把这一间的文件都清了",
+                stray is not null && stray.TryDelete(out _)
+                && !File.Exists(strayRead) && !File.Exists(strayPay), "");
+        }
+        catch (Exception ex)
+        {
+            check("多余数据文件的名单", false, ex.Message);
+        }
+        finally
+        {
+            foreach (string p in new[] { mine, strayRead, strayPay })
+                try { if (File.Exists(p)) File.Delete(p); } catch { /* 删不掉就算了 */ }
+        }
+    }
+
     /// 落到文件里得是正序（最早的在第一行）。老文件是倒序的，载入时应该自己理顺。
     /// 用一对假房号，跑完删文件。
     /// </summary>
@@ -400,6 +621,20 @@ internal static class SelfTest
         SlotTime = slot,
         MeterTime = slot.AddMinutes(-19),
         FetchedAt = slot,
+        Used = used,
+        Remaining = remain,
+        Building = 997,
+        Room = 9997,
+    };
+
+    /// <summary>
+    /// 半点那一次查询：<c>SlotTime</c> 空着（交给仓库按采集时间折算），采集时间落在 xx:30，
+    /// 抄表时间跟 <see cref="Mk"/> 一样，这样"值没变"的情况才真的判成没变。
+    /// </summary>
+    private static Reading Half(DateTime hour, double used, double remain) => new()
+    {
+        MeterTime = hour.AddMinutes(-19),
+        FetchedAt = hour.AddMinutes(30),
         Used = used,
         Remaining = remain,
         Building = 997,

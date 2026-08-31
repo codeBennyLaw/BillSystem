@@ -38,7 +38,7 @@ internal sealed class Segment : Control
     {
         base.OnCreateControl();
         AccessibleRole = AccessibleRole.PageTabList;
-        AccessibleName = "统计粒度";
+        if (string.IsNullOrEmpty(AccessibleName)) AccessibleName = "统计粒度";
     }
 
     public event Action<object>? SelectionChanged;
@@ -46,6 +46,18 @@ internal sealed class Segment : Control
     public void Add(string text, object tag)
     {
         _items.Add((text, tag));
+        Invalidate();
+    }
+
+    public int Count => _items.Count;
+
+    /// <summary>整条重排（宿舍列表变了就得重来一遍）。</summary>
+    public void Clear()
+    {
+        _items.Clear();
+        _index = 0;
+        _posA.Set(0);
+        _hover = -1;
         Invalidate();
     }
 
@@ -62,6 +74,18 @@ internal sealed class Segment : Control
 
     /// <summary>按每格宽度自动定宽（两头还要留出玻璃外的投影和内圈的空隙）。</summary>
     public void AutoWidth(int cellWidth) => Width = Math.Max(1, cellWidth * _items.Count) + 10;
+
+    /// <summary>
+    /// 按最宽那一格的字定宽。房号长短不齐（"43栋422" 和 "999栋9999" 差一截），
+    /// 固定格宽会把字顶到胶囊外面去，所以量一遍再定。
+    /// </summary>
+    public void FitWidth(int minCell, int pad = 26)
+    {
+        int widest = 0;
+        foreach ((string text, _) in _items)
+            widest = Math.Max(widest, TextRenderer.MeasureText(text, Font).Width);
+        AutoWidth(Math.Max(minCell, widest + pad));
+    }
 
     /// <summary>某一格（可以给小数，滑块滑到一半时用）在控件里的位置。</summary>
     private RectangleF CellRect(float i)

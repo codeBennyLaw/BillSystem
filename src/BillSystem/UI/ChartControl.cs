@@ -201,15 +201,6 @@ internal sealed class ChartControl : Control
         return (a, b);
     }
 
-    /// <summary>眼下这一屏里有没有充过值的格子（图例只解释看得见的东西）。</summary>
-    private bool VisibleRecharged()
-    {
-        var (a, b) = VisibleRange();
-        for (int i = a; i <= b; i++)
-            if (_data[i].Recharged) return true;
-        return false;
-    }
-
     private int HitTest(int x)
     {
         if (_data.Count == 0) return -1;
@@ -333,12 +324,15 @@ internal sealed class ChartControl : Control
         double loneVal = 0;
         bool drewLone = false;
 
+        // 剩余为 0 也画一条贴底的细线，表示"确实抄到了，就是没电了"
+        float TopOf(double r) =>
+            p.Bottom - Math.Max(1.5f, (float)(r / rMax * p.Height)) * (float)_growA.Value;
+
         for (int i = a; i <= b; i++)
         {
             if (_data[i].Remaining is not { } r) continue;
 
-            // 剩余为 0 也画一条贴底的细线，表示"确实抄到了，就是没电了"
-            float h = Math.Max(1.5f, (float)(r / rMax * p.Height)) * (float)_growA.Value;
+            float h = p.Bottom - TopOf(r);
             float x = XOf(p, i) + (slot - bw) / 2f;
             bool hot = i == _hover;
 
@@ -351,25 +345,20 @@ internal sealed class ChartControl : Control
                 LinearGradientMode.Vertical);
             g.FillPath(brush, path);
 
-            // 充过值那一格：只把"比上一格多出来"的那一截换成绿色，底下原有的那截还是金色
-            if (_data[i].Recharged && GainHeight(i, r, rMax, p.Height) is { } gain && gain > 0.5f)
-            {
-                GraphicsState st = g.Save();
-                g.IntersectClip(new RectangleF(rect.X - 1, rect.Top - 1, rect.Width + 2, gain + 1));
-                using (var up = new LinearGradientBrush(
-                           new RectangleF(rect.X, rect.Top, rect.Width, Math.Max(gain, 1f)),
-                           Color.FromArgb(hot ? 250 : 210, Theme.Recharge),
-                           Color.FromArgb(hot ? 210 : 150, Theme.Recharge),
-                           LinearGradientMode.Vertical))
-                    g.FillPath(up, path);
-                g.Restore(st);
-            }
-
             loneX = rect.X + bw / 2f;
             loneTop = rect.Top;
             loneVal = r;
             drewLone = true;
         }
+
+        // 标记要压在所有柱子上面画，不然会被旁边那根盖掉
+        if (MarksRecharge)
+            for (int i = a; i <= b; i++)
+            {
+                if (!_data[i].Recharged) continue;
+                float top = _data[i].Remaining is { } rr ? TopOf(rr) : p.Bottom;
+                DrawRechargeMark(g, XOf(p, i) + slot / 2f, Math.Max(p.Top + 4f, top - 6f), i == _hover);
+            }
 
         if (!lone || !drewLone) return;
 
@@ -381,17 +370,47 @@ internal sealed class ChartControl : Control
     }
 
     /// <summary>
-    /// 第 <paramref name="i"/> 格的柱子里"比上一格多出来"的那一截有多高（像素）。
-    /// 找的是前面最近一格有读数的，中间空着的格子跳过；没多出来（或前面没数据）返回 null。
+    /// 只有小时和日粒度在柱子上标充值。月和年那一格里往往有好几笔，标了也说不清是哪一笔，
+    /// 金额和度数照样写在气泡里。
     /// </summary>
-    private float? GainHeight(int i, double cur, double rMax, int plotH)
-    {
-        double? prev = null;
-        for (int k = i - 1; k >= 0; k--)
-            if (_data[k].Remaining is { } pv) { prev = pv; break; }
+    private bool MarksRecharge => Granularity is Granularity.Hour or Granularity.Day;
 
-        if (prev is not { } p0 || cur <= p0) return null;
-        return (float)((cur - p0) / rMax * plotH) * (float)_growA.Value;
+    /// <summary>眼下这一屏里有没有标出来的充值：没有就不摆"充值"那条图例，免得指着个不存在的东西。</summary>
+    private bool VisibleRecharged()
+    {
+        if (!MarksRecharge) return false;
+        var (a, b) = VisibleRange();
+        for (int i = a; i <= b; i++)
+            if (_data[i].Recharged) return true;
+        return false;
+    }
+
+    private static GraphicsPath MarkPath(float cx, float cy)
+    {
+        const float w = 7f, h = 6f;
+        var path = new GraphicsPath();
+        path.AddPolygon(new[]
+        {
+            new PointF(cx, cy - h / 2f),
+            new PointF(cx + w / 2f, cy + h / 2f),
+            new PointF(cx - w / 2f, cy + h / 2f),
+        });
+        return path;
+    }
+
+    /// <summary>
+    /// 充值那一格的标记：柱子顶上一个朝上的小三角。<b>柱子本身的颜色一点不动</b>——柱状图只表示
+    /// 剩余电量，这个三角只说"这一格里充过电"，充了多少钱、折多少度看气泡。
+    /// </summary>
+    private static void DrawRechargeMark(Graphics g, float cx, float cy, bool hot)
+    {
+        using (GraphicsPath shadow = MarkPath(cx, cy + 1f))
+        using (var sb = new SolidBrush(Color.FromArgb(70, 0, 0, 0)))
+            g.FillPath(sb, shadow);
+
+        using GraphicsPath path = MarkPath(cx, cy);
+        using var brush = new SolidBrush(hot ? Theme.Recharge : Color.FromArgb(215, Theme.Recharge));
+        g.FillPath(brush, path);
     }
 
     /// <param name="partial">还没走完的那一格的下标（<c>-1</c> 表示没有）。</param>
@@ -616,6 +635,14 @@ internal sealed class ChartControl : Control
         using var text = new SolidBrush(Theme.TextSub);
         using var sf = new StringFormat { LineAlignment = StringAlignment.Center };
 
+        void Label(string label)
+        {
+            x += 15;
+            SizeF sz = g.MeasureString(label, Theme.FontSmall);
+            g.DrawString(label, Theme.FontSmall, text, new RectangleF(x, y, sz.Width + 4, 18), sf);
+            x += sz.Width + 14;
+        }
+
         void Item(Color c, string label, bool bar)
         {
             using var b = new SolidBrush(c);
@@ -632,35 +659,16 @@ internal sealed class ChartControl : Control
                 g.FillEllipse(b, x + 4f, y + 7f, 4f, 4f);
             }
 
-            x += 15;
-            SizeF sz = g.MeasureString(label, Theme.FontSmall);
-            g.DrawString(label, Theme.FontSmall, text, new RectangleF(x, y, sz.Width + 4, 18), sf);
-            x += sz.Width + 14;
+            Label(label);
         }
 
         Item(Theme.Accent, $"用电量（每{UsageAggregator.UnitName(Granularity)}）", false);
         if (drawRemain) Item(Theme.Remain, "剩余电量", true);
-        // 绿柱子只在眼下这一屏真有充值的时候解释一句，滑到没充过的那几天就不占地方
-        if (drawRemain && VisibleRecharged()) Item(Theme.Recharge, "充值", true);
-
-        // 当前露出来的是哪一段：原来那排翻页按钮和区间文字就是被这行替掉的
-        string cap = RangeCaption();
-        if (cap.Length == 0) return;
-        using var dim = new SolidBrush(Theme.TextDim);
-        using var far = new StringFormat { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center };
-        float capX = Math.Max(x + 8, p.Right - 320);
-        g.DrawString(cap, Theme.FontSmall, dim, new RectangleF(capX, y, p.Right - capX, 18), far);
-    }
-
-    private string RangeCaption()
-    {
-        if (_data.Count == 0) return "";
-        int first = Math.Clamp((int)Math.Round(_scrollA.Value), 0, _data.Count - 1);
-        int last = Math.Clamp(first + _span - 1, 0, _data.Count - 1);
-        string from = UsageAggregator.LongLabel(_data[first].Start, Granularity);
-        string to = UsageAggregator.LongLabel(_data[last].Start, Granularity);
-        string range = first == last ? from : $"{from} — {to}";
-        return _pinned ? $"{range}（最新）" : range;
+        if (drawRemain && VisibleRecharged())
+        {
+            DrawRechargeMark(g, x + 5.5f, y + 9f, false);
+            Label("充值");
+        }
     }
 
     /// <summary>底下那条细滚动条：看得出现在停在整段历史的哪儿，也提示"这张表可以滑"。</summary>
@@ -724,9 +732,10 @@ internal sealed class ChartControl : Control
         if (drawRemain && b.Remaining is { } rem)
             lines.Add(($"剩余  {rem:0.00} 度", Theme.Remain, Theme.FontSmall));
 
-        // 这一格的柱子是绿的，气泡里把金额写出来
+        // 这一格的柱子是绿的，气泡里把金额和折合的度数都写出来
         if (b.Recharged)
-            lines.Add(($"充值  {b.RechargeYuan:0.##} 元", Theme.Recharge, Theme.FontSmall));
+            lines.Add(($"充值  {b.RechargeYuan:0.##} 元 · {b.RechargeKwh:0.0} 度",
+                Theme.Recharge, Theme.FontSmall));
 
         // 只盖到半格：数字还会往上走，不写一句容易当成"用得少"
         if (b.Partial)

@@ -12,6 +12,9 @@ namespace BillSystem.Services;
 /// smtp.qq.com:587 + STARTTLS，用户名是那个 QQ 邮箱地址，密码是邮箱设置→账号里生成的
 /// <b>授权码</b>（16 位字母），不是 QQ 密码。授权码没填就直接跳过，不当成错误。
 ///
+/// 发件箱是所有宿舍共用的，<b>收件人按间配</b>（<see cref="Dorm.MailTo"/>），
+/// 发件人显示名写成触发那一间的房号。
+///
 /// 信发成 multipart/alternative：HTML 那份在手机上一眼看到剩多少、还能用多久，
 /// 纯文本那份保证任何客户端（和通知栏预览）都读得出来。
 ///
@@ -35,36 +38,41 @@ internal static class MailAlert
     private const string Sans =
         "-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif";
 
-    /// <summary>只看授权码：收发地址是写死的，填了授权码就发得出去，没填就只发系统通知。</summary>
-    public static bool Configured(AppConfig cfg) => !string.IsNullOrWhiteSpace(cfg.MailAuthCode);
+    /// <summary>
+    /// 这一间发得出去吗：共用的发件箱和授权码填齐了，而且<b>这一间</b>自己有收件人。
+    /// 差一样就当没配，只走系统通知。
+    /// </summary>
+    public static bool Configured(AppConfig cfg, Dorm dorm) =>
+        !string.IsNullOrWhiteSpace(cfg.MailFrom)
+        && !string.IsNullOrWhiteSpace(cfg.MailAuthCode)
+        && dorm.MailTo.Count > 0;
 
     /// <summary>一封信的三件套。自检里直接查这几段文字，不用真发出去。</summary>
     internal readonly record struct Letter(string Subject, string Text, string Html, string FromName);
 
     /// <summary>
     /// 标题和发件人显示名。手机上弹的邮件通知卡只给这两行：标题喊那句话，发件人报是哪个房间，
-    /// 不用点开就知道是什么事、是谁的电快没了。真的那封和"试一封"用同一套，
-    /// 写死在程序里，设置里没有对应项。
+    /// 不用点开就知道是什么事、是谁的电快没了。几间宿舍共用一个发件箱，
+    /// 发件人显示名写的是<b>触发提醒那一间</b>的房号，一眼分得清。
+    /// 真的那封和"试一封"用同一套，写死在程序里，设置里没有对应项。
     /// </summary>
     private const string Subject = "电量告急！将军救急！";
-
-    private static string RoomName(int building, int room) => $"{building}栋{room}";
 
     /// <summary>
     /// 低电量那封。<paramref name="belowThreshold"/> 区分两种触发：度数低于阈值，
     /// 还是度数还够但照眼下的日均撑不到设置里那个天数——开头那句话跟着变。
     /// </summary>
     public static Task SendLowAsync(
-        AppConfig cfg, Reading r, Summary? s = null, bool belowThreshold = true)
-        => SendAsync(cfg, LowLetter(cfg, r, s, belowThreshold));
+        AppConfig cfg, Dorm dorm, Reading r, Summary? s = null, bool belowThreshold = true)
+        => SendAsync(cfg, dorm, LowLetter(cfg, dorm, r, s, belowThreshold));
 
     /// <summary>设置里"试一封"用的。带上眼下的数字，跟真的那封长一个样。</summary>
-    public static Task SendTestAsync(AppConfig cfg, Summary? s = null)
-        => SendAsync(cfg, TestLetter(cfg, s));
+    public static Task SendTestAsync(AppConfig cfg, Dorm dorm, Summary? s = null)
+        => SendAsync(cfg, dorm, TestLetter(cfg, dorm, s));
 
-    internal static Letter LowLetter(AppConfig cfg, Reading r, Summary? s, bool belowThreshold)
+    internal static Letter LowLetter(AppConfig cfg, Dorm dorm, Reading r, Summary? s, bool belowThreshold)
     {
-        string room = RoomName(r.Building, r.Room);
+        string room = dorm.Short;
         string? left = s?.DaysLeftText;
 
         string lead = belowThreshold
@@ -92,10 +100,10 @@ internal static class MailAlert
             room);
     }
 
-    internal static Letter TestLetter(AppConfig cfg, Summary? s)
+    internal static Letter TestLetter(AppConfig cfg, Dorm dorm, Summary? s)
     {
-        string room = RoomName(AppConfig.FixedBuilding, AppConfig.FixedRoom);
-        const string lead = "这是一封测试邮件，能收到就说明低电量提醒发得出去。";
+        string room = dorm.Short;
+        string lead = $"这是一封测试邮件，能收到就说明 {room} 的低电量提醒发得出去。";
 
         var rows = new List<(string, string)>
         {
@@ -103,14 +111,14 @@ internal static class MailAlert
         };
         Forecast(rows, s);
         rows.Add(("发件", cfg.MailFrom));
-        rows.Add(("收件", AppConfig.MailToLine));
+        rows.Add(("收件", dorm.MailToLine));
         rows.Add(("时间", $"{DateTime.Now:MM-dd HH:mm}"));
 
         string[] notes =
         {
             cfg.LowDaysThreshold > 0
-                ? $"真的那封会在剩余低于 {cfg.LowThreshold:0.##} 度、或预计可用不足 {cfg.LowDaysThreshold:0.##} 天时发出。"
-                : $"真的那封会在剩余低于 {cfg.LowThreshold:0.##} 度时发出。",
+                ? $"真的那封会在 {room} 剩余低于 {cfg.LowThreshold:0.##} 度、或预计可用不足 {cfg.LowDaysThreshold:0.##} 天时发出。"
+                : $"真的那封会在 {room} 剩余低于 {cfg.LowThreshold:0.##} 度时发出。",
         };
 
         return new Letter(
@@ -210,11 +218,14 @@ internal static class MailAlert
     private static string E(string s) => WebUtility.HtmlEncode(s);
 
 #pragma warning disable SYSLIB0014
-    private static async Task SendAsync(AppConfig cfg, Letter letter)
+    private static async Task SendAsync(AppConfig cfg, Dorm dorm, Letter letter)
     {
-        string from = cfg.MailFrom;
+        string from = cfg.MailFrom.Trim();
         string code = cfg.MailAuthCode.Trim();
+        List<string> to = dorm.MailTo.Select(s => s.Trim()).Where(s => s.Length > 0).ToList();
 
+        if (from.Length == 0) throw new InvalidOperationException("还没填发件的 QQ 邮箱地址。");
+        if (to.Count == 0) throw new InvalidOperationException($"{dorm.Short} 还没填收件人。");
         if (code.Length == 0)
             throw new InvalidOperationException(
                 "还没填 QQ 邮箱授权码。到邮箱设置→账号里开启 SMTP 服务，生成的那串 16 位字母就是。");
@@ -230,6 +241,7 @@ internal static class MailAlert
 
         using var msg = new MailMessage
         {
+            // 显示名就是这一间的房号：几间宿舍共用一个发件箱，收件人靠这行分得清是谁的电快没了
             From = new MailAddress(from, letter.FromName, Encoding.UTF8),
             Subject = letter.Subject,
             SubjectEncoding = Encoding.UTF8,
@@ -241,8 +253,8 @@ internal static class MailAlert
         msg.AlternateViews.Add(AlternateView.CreateAlternateViewFromString(
             letter.Html, Encoding.UTF8, MediaTypeNames.Text.Html));
 
-        // 两个收件人都放在收件人里，一封信同时到两边
-        foreach (string to in cfg.MailTo) msg.To.Add(new MailAddress(to));
+        // 这一间的收件人都放在收件人里，一封信同时到几边
+        foreach (string one in to) msg.To.Add(new MailAddress(one));
 
         try
         {

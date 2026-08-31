@@ -3,11 +3,12 @@ using BillSystem.Models;
 using BillSystem.Services;
 using BillSystem.UI;
 
-namespace BillSystem;
+namespace BillSystem.Dev;
 
 /// <summary>
 /// 开发用出图：<c>BillSystem.exe --screenshot [目录]</c>。
 /// 用一份假数据把主窗口和任务栏组件各自渲染成 PNG，方便离屏检查排版，不截屏。
+/// 数据全落在 <see cref="AppConfig.UseSandbox"/> 开的沙盒目录里，真实记录一个字都不碰。
 /// </summary>
 internal static class DevShot
 {
@@ -15,36 +16,46 @@ internal static class DevShot
     {
         Directory.CreateDirectory(outDir);
 
-        // 出图用假房号，别污染真实数据；也别动用户的 config.json
-        string seedFile = Path.Combine(AppConfig.DataDir, "readings-B999-R9999.jsonl");
-        if (File.Exists(seedFile)) File.Delete(seedFile);
-        byte[]? cfgBackup = File.Exists(AppConfig.ConfigPath) ? File.ReadAllBytes(AppConfig.ConfigPath) : null;
+        using var api = new ElectricityApi();
+        // 出图用假房号和假邮箱，别把真实数据和真邮箱印进 docs 里的图
+        var dorm = new Dorm(999, 9999)
+        {
+            NotifyEnabled = true,
+            MailEnabled = true,
+            MailTo = { "someone@example.com", "roommate@example.com" },
+        };
+        var one = new Dorm(998, 9998) { NotifyEnabled = true };
 
-        var store = new ReadingStore(999, 9999);
-        List<DateTime> topUps = Seed(store);
+        // 两间：主界面上就能看到宿舍切换器（只有一间时那儿是一行房间名）
+        var session = new DormSession(dorm, api);
+        var oneSession = new DormSession(one, api);
+
+        List<DateTime> topUps = Seed(session.Readings);
 
         // 充值记录跟上面那份假读数里"剩余电量突然涨上去"的时刻对上，
-        // 图表上那几根绿柱子才跟真程序一个意思
-        string payFile = Path.Combine(AppConfig.DataDir, "recharges-B999-R9999.jsonl");
-        if (File.Exists(payFile)) File.Delete(payFile);
-        var payStore = new RechargeStore(999, 9999);
+        // 图表上那几根柱子才跟真程序一个意思
+        RechargeStore payStore = session.Recharges;
         payStore.Merge(TopUpRecords(topUps));
 
         var cfg = new AppConfig
         {
+            Dorms = { dorm, one },
+            CurrentDorm = dorm.Key,
             Granularity = Granularity.Day,
+            MailFrom = "someone@example.com",
         };
 
-        var form = new MainForm(cfg, store, payStore)
+        var form = new MainForm(cfg)
         {
             StartPosition = FormStartPosition.Manual,
             Location = new Point(-4000, -4000),
         };
         form.ClientSize = new Size(1080, 700);
+        form.SetDorms(new[] { session, oneSession }, session);
         form.Show();
         Application.DoEvents();
 
-        Reading last = store.Latest!;
+        Reading last = session.Readings.Latest!;
         var status = new PollStatus { Latest = last, LastSuccess = DateTime.Now, LastAttempt = DateTime.Now };
         form.UpdateStatus(status);
         Save(form, Path.Combine(outDir, "main-day.png"));
@@ -59,49 +70,41 @@ internal static class DevShot
         form.UpdateStatus(status);
         Save(form, Path.Combine(outDir, "main-month.png"));
 
-        form.Hide();
+        cfg.Granularity = Granularity.Day;
+        form.ApplyConfig(cfg);
 
         // 只有一条抄表记录的样子：用电量算不出来，但图表不该整块空白
-        string oneFile = Path.Combine(AppConfig.DataDir, "readings-B998-R9998.jsonl");
-        if (File.Exists(oneFile)) File.Delete(oneFile);
-        var oneStore = new ReadingStore(998, 9998);
         DateTime oneSlot = Reading.SlotOf(DateTime.Now);
-        oneStore.TryAdd(new Reading
+        oneSession.Readings.TryAdd(new Reading
         {
             SlotTime = oneSlot,
             MeterTime = DateTime.Now.Date.AddHours(9).AddMinutes(45),
             FetchedAt = DateTime.Now,
             Used = 3343.10,
             Remaining = 31.68,
-            Building = 998,
-            Room = 9998,
+            Building = one.Building,
+            Room = one.Room,
         });
 
-        var oneCfg = cfg.Clone();
-        oneCfg.Granularity = Granularity.Day;
-        var oneForm = new MainForm(oneCfg, oneStore)
+        form.Bind(oneSession);
+        form.UpdateStatus(new PollStatus
         {
-            StartPosition = FormStartPosition.Manual,
-            Location = new Point(-4000, -4000),
-        };
-        oneForm.ClientSize = new Size(1080, 700);
-        oneForm.Show();
-        Application.DoEvents();
-        oneForm.UpdateStatus(new PollStatus
-        {
-            Latest = oneStore.Latest,
+            Latest = oneSession.Readings.Latest,
             LastSuccess = DateTime.Now,
             LastAttempt = DateTime.Now,
         });
-        Save(oneForm, Path.Combine(outDir, "main-single-reading.png"));
-        oneForm.Hide();
-        oneForm.Dispose();
+        Save(form, Path.Combine(outDir, "main-single-reading.png"));
+
+        form.Bind(session);
+        form.UpdateStatus(status);
+        form.Hide();
 
         // 任务栏组件：离屏冻结成实测的 43px 高，不去贴真任务栏，免得在用户桌面上闪一下
         var widget = new TaskbarWidget(cfg) { Location = new Point(-4000, -4000) };
+        widget.SetDorm(dorm);
         widget.DevFreeze(43);
         widget.Show();
-        widget.UpdateData(status, UsageAggregator.Summarize(store.Snapshot(), DateTime.Now));
+        widget.UpdateData(status, UsageAggregator.Summarize(session.Readings.Snapshot(), DateTime.Now));
         widget.DevFreeze(43);
         Application.DoEvents();
         Save(widget, Path.Combine(outDir, "widget.png"));
@@ -117,8 +120,9 @@ internal static class DevShot
         Save(tip, Path.Combine(outDir, "widget-tip.png"));
         tip.Hide();
 
-        // 设置窗口：只出图，不真的弹出来（Show 之后立刻画进位图再关掉）
-        using var api = new ElectricityApi();
+        // 设置窗口：四页各出一张，只画不真的弹出来。
+        // "数据"页列的是名单外的历史文件，先造一间不在名单里的假房号出来
+        StrayFiles();
         var dlg = new SettingsForm(cfg, api)
         {
             StartPosition = FormStartPosition.Manual,
@@ -126,7 +130,16 @@ internal static class DevShot
         };
         dlg.Show();
         Application.DoEvents();
-        Save(dlg, Path.Combine(outDir, "settings.png"));
+        foreach ((int page, string name) in new[]
+                 {
+                     (0, "settings-dorms"), (1, "settings-alert"),
+                     (2, "settings-widget"), (3, "settings-data"),
+                 })
+        {
+            dlg.DevShowPage(page);
+            Application.DoEvents();
+            Save(dlg, Path.Combine(outDir, $"{name}.png"));
+        }
         dlg.Hide();
         dlg.Dispose();
 
@@ -141,8 +154,8 @@ internal static class DevShot
             FetchedAt = last.FetchedAt,
             Used = last.Used,
             Remaining = 4.2,
-            Building = AppConfig.FixedBuilding,
-            Room = AppConfig.FixedRoom,
+            Building = dorm.Building,
+            Room = dorm.Room,
         };
         var mailSummary = new Summary
         {
@@ -159,16 +172,16 @@ internal static class DevShot
         };
         var utf8 = new System.Text.UTF8Encoding(false);
         File.WriteAllText(Path.Combine(outDir, "mail-low.html"),
-            MailAlert.LowLetter(mailCfg, lowNow, mailSummary, belowThreshold: true).Html, utf8);
+            MailAlert.LowLetter(mailCfg, dorm, lowNow, mailSummary, belowThreshold: true).Html, utf8);
         File.WriteAllText(Path.Combine(outDir, "mail-soon.html"),
-            MailAlert.LowLetter(mailCfg, lowNow, mailSummary, belowThreshold: false).Html, utf8);
+            MailAlert.LowLetter(mailCfg, dorm, lowNow, mailSummary, belowThreshold: false).Html, utf8);
 
         // 充值窗口：假记录 + 一张现成的付款码，offline 保证不联网、不下单。
         // 上面主界面用过的那几笔之外再补一批，好把记录列表填满
         payStore.Merge(SeedRecharges());
 
         using var payApi = new RechargeApi();
-        var pay = new RechargeForm(cfg, payApi, payStore, offline: true)
+        var pay = new RechargeForm(payApi, session, offline: true)
         {
             StartPosition = FormStartPosition.Manual,
             Location = new Point(-4000, -4000),
@@ -194,11 +207,40 @@ internal static class DevShot
 
         form.Dispose();
         widget.Dispose();
-        if (File.Exists(seedFile)) File.Delete(seedFile);
-        if (File.Exists(oneFile)) File.Delete(oneFile);
-        if (File.Exists(payFile)) File.Delete(payFile);
-        if (cfgBackup is not null) File.WriteAllBytes(AppConfig.ConfigPath, cfgBackup);
+        session.Dispose();
+        oneSession.Dispose();
         return 0;
+    }
+
+    /// <summary>
+    /// 造一间"名单里没有、文件还在"的假宿舍，好让设置的"数据"页有东西可列。
+    /// 行数是照着真实文件的量级编的，内容只用来数行，不会被解析。
+    /// </summary>
+    private static void StrayFiles()
+    {
+        var stray = new Dorm(997, 9997);
+        DateTime t = DateTime.Now.Date.AddDays(-30);
+
+        var readings = new List<string>();
+        for (int i = 0; i < 312; i++)
+        {
+            DateTime at = t.AddHours(i * 2);
+            readings.Add($"{{\"SlotTime\":\"{at:s}\",\"MeterTime\":\"{at:s}\",\"FetchedAt\":\"{at:s}\","
+                         + $"\"Used\":{2100 + i * 0.4:0.00},\"Remaining\":{60 - i % 55 * 0.9:0.00},"
+                         + $"\"Building\":{stray.Building},\"Room\":{stray.Room}}}");
+        }
+
+        var pays = new List<string>();
+        for (int i = 0; i < 12; i++)
+        {
+            DateTime at = t.AddDays(i * 2.5);
+            pays.Add($"{{\"OrderCode\":\"OLD{i:00}\",\"PayTime\":\"{at:s}\",\"PayCent\":5000,"
+                     + $"\"PayMethod\":\"code\",\"PayResult\":\"已完成\","
+                     + $"\"Building\":{stray.Building},\"Room\":{stray.Room}}}");
+        }
+
+        File.WriteAllLines(Path.Combine(AppConfig.DataDir, $"readings-{stray.Key}.jsonl"), readings);
+        File.WriteAllLines(Path.Combine(AppConfig.DataDir, $"recharges-{stray.Key}.jsonl"), pays);
     }
 
     /// <summary>假读数里每一次"剩余电量涨上去"都配一条充值记录，图表上就是那几根绿柱子。</summary>

@@ -96,10 +96,10 @@ internal sealed class RecordList : Control
         RectangleF card = Theme.Inner(this);
         Theme.Glass(g, card, 14f, 0.05f);
 
-        // 四列：时间 / 金额 / 方式 / 状态
+        // 四列：时间 / 金额 / 方式 / 状态。金额那列要装"30 元 · 45.0 度"两个数，留宽一点
         int x0 = 14, x3 = Width - 14;
-        int cAmount = x0 + Math.Max(120, (int)((x3 - x0) * 0.42));
-        int cMethod = cAmount + 86;
+        int cAmount = x0 + Math.Max(120, (int)((x3 - x0) * 0.34));
+        int cMethod = cAmount + 150;
         int cState = Math.Max(cMethod + 70, x3 - 66);
 
         Head(g, "时间", x0, cAmount - x0);
@@ -151,7 +151,7 @@ internal sealed class RecordList : Control
             }
 
             Cell(g, r.PayTime.ToString("yyyy-MM-dd HH:mm"), x0, cAmount - x0, top, Theme.Text);
-            Cell(g, $"{r.Yuan:0.##} 元", cAmount, cMethod - cAmount, top, Theme.Remain, true);
+            Cell(g, $"{r.Yuan:0.##} 元 · {r.Kwh:0.0} 度", cAmount, cMethod - cAmount, top, Theme.Remain, true);
             Cell(g, r.MethodLabel, cMethod + 10, cState - cMethod - 10, top, Theme.TextSub);
             Cell(g, r.PayResult.Length == 0 ? "—" : r.PayResult, cState, x3 - cState, top, Theme.Good);
         }

@@ -13,7 +13,8 @@ public sealed class PollStatus
 }
 
 /// <summary>
-/// 后台轮询：每个整点查一次接口，把读数记在那个整点上。
+/// 后台轮询：<b>每到整点和半点各查一次</b>，读数都记在那个整点那一格上。
+/// 半点查到的值跟这一格里已经有的不一样就顶替掉它，一样就什么都不做。
 /// 事件都会切回创建它的线程（UI 线程）上抛，界面里直接用就行。
 /// </summary>
 public sealed class PollService : IDisposable
@@ -27,7 +28,6 @@ public sealed class PollService : IDisposable
     private readonly SemaphoreSlim _wake = new(0, 1);
 
     private readonly ReadingStore _store;
-    private readonly AppConfig _config;
     private Task? _loop;
 
     /// <summary>每次查询完成（成功或失败）都会触发。</summary>
@@ -40,18 +40,18 @@ public sealed class PollService : IDisposable
 
     public ReadingStore Store => _store;
 
-    public PollService(ElectricityApi api, ReadingStore store, AppConfig config)
+    /// <summary>查的是仓库自己那间宿舍：一间一个 <see cref="PollService"/>，各自记账、各自重试。</summary>
+    public PollService(ElectricityApi api, ReadingStore store)
     {
         _api = api;
         _store = store;
-        _config = config;
         _ui = SynchronizationContext.Current ?? new SynchronizationContext();
         Status = new PollStatus { Latest = store.Latest, LastSuccess = null };
     }
 
     public void Start() => _loop ??= Task.Run(LoopAsync);
 
-    /// <summary>立刻查一次（不等下一个整点）。正查着的时候按下也不会丢，查完马上再来一次。</summary>
+    /// <summary>立刻查一次（不等下一个整点 / 半点）。正查着的时候按下也不会丢，查完马上再来一次。</summary>
     public void Wake()
     {
         try { _wake.Release(); }
@@ -77,8 +77,8 @@ public sealed class PollService : IDisposable
                 finally { _once.Release(); }
             }
 
-            // 失败了就一分钟后再试，别傻等到下一个整点
-            TimeSpan wait = ok ? NextDelay() : TimeSpan.FromMinutes(1);
+            // 失败了就一分钟后再试，别傻等到下一个整点 / 半点
+            TimeSpan wait = ok ? NextDelay(DateTime.Now) : TimeSpan.FromMinutes(1);
 
             try { await _wake.WaitAsync(wait, _cts.Token).ConfigureAwait(false); }
             catch (OperationCanceledException) { /* 退出 */ }
@@ -87,13 +87,17 @@ public sealed class PollService : IDisposable
     }
 
     /// <summary>
-    /// 每个<b>整点</b>查一次，读数就记在那个整点上（3:00 查到的一条减 2:00 那条 = 两点这一格的用电量）。
-    /// 学校抄表本来几个小时才一次，查得再勤也没有更细的数据。
+    /// 下一次查询的时刻：<b>每个整点和每个半点</b>（xx:00:00 / xx:30:00）。
+    ///
+    /// 读数记在整点那一格上（3:00 查到的一条减 2:00 那条 = 两点这一格的用电量），
+    /// 半点那一次落的是<b>同一格</b>：查到的值变了就顶替掉这一格里原来那条，
+    /// 一样就当没这回事（<see cref="ReadingStore.TryAdd"/> 直接返回 false，不写盘也不重画）。
+    /// 学校两三个小时才抄一次表，多这一次不会凭空多出数据点，但抄表一上传就能早半小时看到。
     /// </summary>
-    private static TimeSpan NextDelay()
+    internal static TimeSpan NextDelay(DateTime now)
     {
-        DateTime now = DateTime.Now;
-        DateTime next = now.Date.AddHours(now.Hour + 1);   // 下一个 xx:00:00
+        DateTime hour = now.Date.AddHours(now.Hour);
+        DateTime next = hour.AddMinutes(now.Minute < 30 ? 30 : 60);
         TimeSpan d = next - now;
         return d < TimeSpan.FromMilliseconds(200) ? TimeSpan.FromMilliseconds(200) : d;
     }
@@ -112,7 +116,7 @@ public sealed class PollService : IDisposable
 
         try
         {
-            Reading r = await _api.QueryAsync(_config.Building, _config.Room, ct).ConfigureAwait(false);
+            Reading r = await _api.QueryAsync(_store.Building, _store.Room, ct).ConfigureAwait(false);
             bool isNew = _store.TryAdd(r);
 
             Status = new PollStatus

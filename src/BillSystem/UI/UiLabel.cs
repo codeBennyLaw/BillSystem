@@ -37,6 +37,12 @@ internal sealed class UiLabel : Control
     /// <summary>放不下时折行（默认单行，超了以省略号收尾）。</summary>
     public bool Wrap { get; set; }
 
+    /// <summary>
+    /// 单行放不下时省略中段而不是尾巴。磁盘路径用：整条路径没有空格断不了行，
+    /// 折行会把尾巴顶到控件外面去，而尾巴那截目录名恰恰是最该看到的。
+    /// </summary>
+    public bool PathEllipsis { get; set; }
+
     protected override void OnPaint(PaintEventArgs e)
     {
         Theme.PaintBackdrop(e.Graphics, this);
@@ -63,7 +69,10 @@ internal sealed class UiLabel : Control
                 => TextFormatFlags.Bottom,
             _ => TextFormatFlags.VerticalCenter,
         };
-        f |= Wrap ? TextFormatFlags.WordBreak : TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine;
+        f |= Wrap
+            ? TextFormatFlags.WordBreak
+            : TextFormatFlags.SingleLine
+              | (PathEllipsis ? TextFormatFlags.PathEllipsis : TextFormatFlags.EndEllipsis);
         return f;
     }
 

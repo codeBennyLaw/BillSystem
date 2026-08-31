@@ -16,6 +16,8 @@
     <AssemblyTitle>宿舍电费助手</AssemblyTitle>
     <Version>1.0.0</Version>
     <NeutralLanguage>zh-Hans</NeutralLanguage>
+    <!-- 界面只有简体中文，别把另外十几种语言的资源 dll 一起打包（自带运行时时能省十几兆） -->
+    <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>
     <DebugType>embedded</DebugType>
   </PropertyGroup>
 

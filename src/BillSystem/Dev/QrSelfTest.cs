@@ -1,7 +1,7 @@
 using System.Text;
 using BillSystem.Services;
 
-namespace BillSystem;
+namespace BillSystem.Dev;
 
 /// <summary>
 /// 二维码自检。不看编码器的任何中间结果，只把它画出来的格子当成扫码器眼里的图，
