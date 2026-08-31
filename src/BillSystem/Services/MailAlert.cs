@@ -75,11 +75,11 @@ internal static class MailAlert
         var rows = new List<(string, string)> { ("剩余电量", $"{r.Remaining:0.00} 度") };
         Forecast(rows, s);
         rows.Add(("累计用电", $"{r.Used:0.00} 度"));
-        rows.Add(("抄表时间", $"{r.MeterTime:MM-dd HH:mm}（{Ago(r.MeterTime)}）"));
+        rows.Add(("抄表时间", $"{r.MeterTime:MM-dd HH:mm}（{Fmt.Ago(r.MeterTime)}）"));
 
         string[] notes =
         {
-            "充电费：打开“宿舍电费助手”→ 充值，选好金额生成付款码，微信扫一下就行。",
+            "充电费：打开“宿舍电费助手”→ 充值，微信扫码付。",
             dorm.LowDaysThreshold > 0
                 ? $"提醒条件：剩余低于 {dorm.LowThreshold:0.##} 度，或预计可用不足 {dorm.LowDaysThreshold:0.##} 天。"
                 : $"提醒条件：剩余低于 {dorm.LowThreshold:0.##} 度。",
@@ -139,16 +139,6 @@ internal static class MailAlert
             rows.Add(("日均用电", $"{s.AvgDaily:0.00} 度（近 {s.AvgSpanDays:0.#} 天）"));
         if (s.Today > 0) rows.Add(("今日用电", $"{s.Today:0.00} 度"));
         if (s.ThisMonth > 0) rows.Add(("本月用电", $"{s.ThisMonth:0.00} 度"));
-    }
-
-    /// <summary>"3 小时前"这种。学校两三个钟才抄一次表，光看绝对时间不知道这个数新不新。</summary>
-    private static string Ago(DateTime t)
-    {
-        TimeSpan d = DateTime.Now - t;
-        if (d.TotalMinutes < 1) return "刚刚";
-        if (d.TotalMinutes < 60) return $"{d.TotalMinutes:0} 分钟前";
-        if (d.TotalHours < 48) return $"{d.TotalHours:0.#} 小时前";
-        return $"{d.TotalDays:0} 天前";
     }
 
     /// <summary>纯文本那份：开头一句话 + 一行一个数 + 末尾几句说明。</summary>

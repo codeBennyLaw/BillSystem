@@ -9,7 +9,6 @@ public sealed class PollStatus
     public DateTime? LastAttempt { get; init; }
     public string? Error { get; init; }
     public bool Busy { get; init; }
-    public bool Online => Error is null && LastSuccess is not null;
 }
 
 /// <summary>
@@ -59,13 +58,6 @@ public sealed class PollService : IDisposable
         catch (ObjectDisposedException) { /* 已经退出了 */ }
     }
 
-    public async Task RefreshNowAsync()
-    {
-        if (!await _once.WaitAsync(0).ConfigureAwait(false)) return;
-        try { await QueryOnceAsync(_cts.Token).ConfigureAwait(false); }
-        finally { _once.Release(); }
-    }
-
     private async Task LoopAsync()
     {
         while (!_cts.IsCancellationRequested)
@@ -89,7 +81,7 @@ public sealed class PollService : IDisposable
     /// <summary>
     /// 下一次查询的时刻：<b>每个整点和每个半点</b>（xx:00:00 / xx:30:00）。
     /// 半点那一次落的是同一格，值一样就当没这回事（<see cref="ReadingStore.TryAdd"/> 返回 false）。
-    /// 学校两三个小时才抄一次表，多查这一次不会凭空多出数据点，但抄表一上传就能早半小时看到。
+    /// 电表什么时候上传读数说不准，多查这一次不会凭空多出数据点，但一上传就能早半小时看到。
     /// </summary>
     internal static TimeSpan NextDelay(DateTime now)
     {

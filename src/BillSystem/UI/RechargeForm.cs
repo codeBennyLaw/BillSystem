@@ -57,6 +57,12 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
     private DateTime _lastPoll = DateTime.MinValue;
     private bool _paid;
 
+    /// <summary>出图用：一次都不许联网。</summary>
+    private readonly bool _offline;
+
+    /// <summary>上一次从学校那边拉记录是什么时候，用来挡住重复拉。</summary>
+    private DateTime _lastHist = DateTime.MinValue;
+
     /// <summary>
     /// 窗口活着期间的总闸：关掉窗口就把还在飞的下单/查单/拉历史一起取消。
     /// 链出去的子 CTS 可能比它活得久，所以这个不 Dispose。
@@ -71,6 +77,7 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
         _api = api;
         _cfg = cfg;
         _s = session;
+        _offline = offline;
 
         Text = "电费充值";
         ClientSize = new Size(W, H);
@@ -95,6 +102,12 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
 
         ShowLocal();
         if (!offline) _ = ReloadHistoryAsync();   // offline 是出图用的，别联网
+
+        // 窗口是同一个实例反复用的，再露脸时对一遍状态：刚付完那一刻学校那边常常还写着"处理中"
+        VisibleChanged += (_, _) =>
+        {
+            if (Visible && (DateTime.Now - _lastHist).TotalSeconds > 5) _ = ReloadHistoryAsync();
+        };
         Fade.In(this);
     }
 
@@ -488,6 +501,8 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
 
     private async Task ReloadHistoryAsync()
     {
+        if (_offline) return;
+        _lastHist = DateTime.Now;
         try
         {
             List<RechargeRecord> fromServer =

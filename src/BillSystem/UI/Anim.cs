@@ -27,16 +27,9 @@ internal sealed class Anim
     }
 
     public double Value { get; private set; }
-    public double Target => _to;
 
     /// <summary>还在动。数字滚动那种需要"动的时候画中间值"的可以看这个。</summary>
     public bool Running => _t < 1 || _delay > 0;
-
-    public int Ms
-    {
-        get => (int)_ms;
-        set => _ms = Math.Max(1, value);
-    }
 
     /// <summary>
     /// 平滑过渡到新目标。<paramref name="delayMs"/> 给了就先等这么久再起步——

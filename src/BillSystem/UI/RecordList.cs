@@ -7,7 +7,7 @@ namespace BillSystem.UI;
 /// 充值记录列表。条目不多（一年一百来条），自己画一整块 + 手动滚动就够了，
 /// 用 ListView 反而要跟深色主题打一架。
 /// </summary>
-internal sealed class RecordList : Control
+internal sealed class RecordList : Control, IWheelScroll
 {
     private const int RowH = 34;
     private const int HeadH = 26;
@@ -50,12 +50,12 @@ internal sealed class RecordList : Control
     /// <summary>画出来的位置（动画中的中间值），命中判定也用它，跟眼睛看到的对得上。</summary>
     private int Shown => (int)Math.Round(_scrollA.Value);
 
-    protected override void OnMouseWheel(MouseEventArgs e)
+    /// <summary>滚轮上下滑，一下走两行。滚轮是 <see cref="Wheel"/> 按鼠标位置派过来的。</summary>
+    public void ScrollByWheel(int delta)
     {
-        base.OnMouseWheel(e);
         if (MaxScroll <= 0) return;
         double before = _scroll;
-        _scroll = Math.Clamp(_scroll - e.Delta / 120.0 * RowH * 2, 0, MaxScroll);
+        _scroll = Math.Clamp(_scroll - delta / 120.0 * RowH * 2, 0, MaxScroll);
         if (Math.Abs(_scroll - before) > 0.01) _scrollA.To(_scroll);
     }
 
@@ -153,7 +153,7 @@ internal sealed class RecordList : Control
             Cell(g, r.PayTime.ToString("yyyy-MM-dd HH:mm"), x0, cAmount - x0, top, Theme.Text);
             Cell(g, $"{r.Yuan:0.##} 元 · {r.Kwh:0.0} 度", cAmount, cMethod - cAmount, top, Theme.Remain, true);
             Cell(g, r.MethodLabel, cMethod + 10, cState - cMethod - 10, top, Theme.TextSub);
-            Cell(g, r.PayResult.Length == 0 ? "—" : r.PayResult, cState, x3 - cState, top, Theme.Good);
+            Cell(g, r.PayResult.Length == 0 ? "—" : r.PayResult, cState, x3 - cState, top, StateColor(r.PayResult));
         }
 
         g.ResetClip();
@@ -180,4 +180,13 @@ internal sealed class RecordList : Control
         => TextRenderer.DrawText(g, text, Font, new Rectangle(x, top, Math.Max(1, w), RowH), color,
             (right ? TextFormatFlags.Right : TextFormatFlags.Left)
             | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+
+    /// <summary>状态那一列的颜色。学校那边给的是中文，还没落定的别画成绿的。</summary>
+    private static Color StateColor(string state) => state switch
+    {
+        "已完成" or "成功" => Theme.Good,
+        "失败" or "已取消" or "已关闭" => Theme.Bad,
+        "" => Theme.TextDim,
+        _ => Theme.Warn,
+    };
 }

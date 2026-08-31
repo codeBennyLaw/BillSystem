@@ -61,24 +61,6 @@ internal sealed class StatCard : Control
     public string Title { get => _title; set { _title = value; SyncAccessible(); Invalidate(); } }
     public string Unit { get => _unit; set { _unit = value; SyncAccessible(); Invalidate(); } }
 
-    public Color ValueColor
-    {
-        get => _valueColor;
-        set => SetColor(value);
-    }
-
-    public string Value
-    {
-        get => _value;
-        set => Set(value);
-    }
-
-    public string Sub
-    {
-        get => _sub;
-        set { _sub = value; Invalidate(); }
-    }
-
     /// <summary>换颜色也是滑过去的：绿→黄→红那一下跳变很扎眼。</summary>
     private void SetColor(Color c)
     {

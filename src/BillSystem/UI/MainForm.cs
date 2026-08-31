@@ -3,7 +3,7 @@ using BillSystem.Services;
 
 namespace BillSystem.UI;
 
-internal sealed class MainForm : Form, IMessageFilter
+internal sealed class MainForm : Form
 {
     private readonly StatCard _cardRemain = new();
     private readonly StatCard _cardToday = new();
@@ -73,7 +73,6 @@ internal sealed class MainForm : Form, IMessageFilter
         Layout1();
         TabOrder();
         RefreshData();
-        Application.AddMessageFilter(this);
 
         _ageTick.Tick += (_, _) => ApplyStatusText();
         VisibleChanged += (_, _) =>
@@ -175,7 +174,7 @@ internal sealed class MainForm : Form, IMessageFilter
         _tip.ShowFor(card, t.Title, t.Rows);
     }
 
-    private static string Money(double kwh) => $"{AppConfig.YuanOf(kwh):0.00} 元";
+    private static string Money(double kwh) => Fmt.Money(kwh);
 
     /// <summary>
     /// 出图用：把某张卡片的"折成多少钱"小窗贴出来（没法在离屏渲染里真去悬停）。
@@ -250,31 +249,9 @@ internal sealed class MainForm : Form, IMessageFilter
             Math.Max(80, h - Pad - chartTop));
     }
 
-    private const int WmMouseWheel = 0x020A;
-
-    /// <summary>
-    /// 滚轮消息是发给焦点控件的，不是鼠标底下那个。图表不去抢焦点（点一下就抢走焦点很讨厌），
-    /// 所以在这儿按鼠标位置把滚轮转给它。
-    /// </summary>
-    public bool PreFilterMessage(ref Message m)
-    {
-        if (m.Msg != WmMouseWheel || !Visible || ActiveForm != this) return false;
-        if (_chart.IsDisposed || !_chart.Visible) return false;
-
-        Point pt = _chart.PointToClient(Cursor.Position);
-        if (!_chart.ClientRectangle.Contains(pt)) return false;
-
-        _chart.ScrollByWheel((short)(m.WParam.ToInt64() >> 16));
-        return true;
-    }
-
     protected override void Dispose(bool disposing)
     {
-        if (disposing)
-        {
-            Application.RemoveMessageFilter(this);
-            _ageTick.Dispose();
-        }
+        if (disposing) _ageTick.Dispose();
         base.Dispose(disposing);
     }
 
@@ -362,8 +339,8 @@ internal sealed class MainForm : Form, IMessageFilter
         PollStatus st = _status0;
         _status.Say(
             st.Busy ? "正在查询…"
-                : st.Error is not null ? $"更新失败：{Clip(st.Error, 34)}"
-                : st.LastSuccess is { } t ? $"已更新 · {HumanAge(t)}"
+                : st.Error is not null ? $"更新失败：{Fmt.Clip(st.Error, 34)}"
+                : st.LastSuccess is { } t ? $"已更新 · {Fmt.Ago(t)}"
                 : "等待首次查询",
             st.Error is not null ? Theme.Bad
                 : st.Busy ? Theme.Accent
@@ -430,17 +407,6 @@ internal sealed class MainForm : Form, IMessageFilter
         _cardLeft.Set(leftValue,
             s.RunOutDate is { } ro ? $"约到 {ro:MM-dd HH:mm}" : "",
             s.DaysLeft is { } d2 ? (d2 <= 3 ? Theme.Bad : d2 <= 7 ? Theme.Warn : Theme.Good) : Theme.TextDim);
-    }
-
-    private static string Clip(string s, int max) => s.Length <= max ? s : s[..max] + "…";
-
-    private static string HumanAge(DateTime t)
-    {
-        TimeSpan d = DateTime.Now - t;
-        if (d < TimeSpan.FromSeconds(45)) return "刚刚";
-        if (d < TimeSpan.FromMinutes(60)) return $"{d.TotalMinutes:0} 分钟前";
-        if (d < TimeSpan.FromHours(24)) return $"{d.TotalHours:0} 小时前";
-        return t.ToString("MM-dd HH:mm");
     }
 
     /// <summary>关窗口只是收进托盘，后台还得继续记用电。</summary>

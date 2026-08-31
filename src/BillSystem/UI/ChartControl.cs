@@ -9,7 +9,7 @@ namespace BillSystem.UI;
 /// 充过值的那一格在柱顶点一个小三角。整段历史就是一张表，滚轮（或按住左键拖）左右滑动，不分页。
 /// 纵轴按整段历史定标，所以滑动过程中高度不会忽然改变比例。
 /// </summary>
-internal sealed class ChartControl : Control
+internal sealed class ChartControl : Control, IWheelScroll
 {
     private List<Bucket> _data = new();
     private int _hover = -1;
@@ -112,7 +112,7 @@ internal sealed class ChartControl : Control
         if (instant) _scrollA.Set(_scroll); else _scrollA.To(_scroll);
     }
 
-    /// <summary>滚轮左右滑：往上滚是往过去看，一格走六分之一屏。</summary>
+    /// <summary>滚轮左右滑：往上滚是往过去看，一格走六分之一屏。焦点不在自己身上，靠 <see cref="Wheel"/> 派过来。</summary>
     public void ScrollByWheel(int delta)
     {
         if (MaxScroll <= 0) return;
@@ -122,17 +122,10 @@ internal sealed class ChartControl : Control
         _scrollA.To(_scroll);
     }
 
-    /// <summary>回到最右边（最新）。</summary>
     public void ScrollToEnd()
     {
         _pinned = true;
         ClampScroll(false);
-    }
-
-    protected override void OnMouseWheel(MouseEventArgs e)
-    {
-        base.OnMouseWheel(e);
-        ScrollByWheel(e.Delta);
     }
 
     /// <summary>双击回到最新，省得从头滑回来。</summary>
@@ -157,7 +150,8 @@ internal sealed class ChartControl : Control
     {
         base.OnMouseUp(e);
         _pressing = _dragging = false;
-        Cursor = Cursors.Default;
+        // 松手了还停在表上：光标留着左右箭头，还能接着拖
+        Cursor = MaxScroll > 0 && Plot.Contains(e.Location) ? Cursors.SizeWE : Cursors.Default;
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -181,12 +175,16 @@ internal sealed class ChartControl : Control
 
         int idx = HitTest(e.X);
         if (idx != _hover) { _hover = idx; Invalidate(); }
+
+        // 表比一屏长才拖得动。光标在这儿改成左右箭头，不用另写一句"可以拖"
+        Cursor = MaxScroll > 0 && Plot.Contains(e.Location) ? Cursors.SizeWE : Cursors.Default;
     }
 
     protected override void OnMouseLeave(EventArgs e)
     {
         base.OnMouseLeave(e);
         _pressing = _dragging = false;
+        Cursor = Cursors.Default;
         if (_hover != -1) { _hover = -1; Invalidate(); }
     }
 
@@ -756,7 +754,6 @@ internal sealed class ChartControl : Control
         if (drawRemain && b.Remaining is { } rem)
             lines.Add(($"剩余  {rem:0.00} 度", Theme.Remain, Theme.FontSmall));
 
-        // 金额和折合的度数都写出来
         if (b.Recharged)
             lines.Add(($"充值  {b.RechargeYuan:0.##} 元 · {b.RechargeKwh:0.0} 度",
                 Theme.Recharge, Theme.FontSmall));

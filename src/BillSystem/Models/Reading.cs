@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text.Json.Serialization;
 
 namespace BillSystem.Models;
 
@@ -30,13 +29,6 @@ public sealed class Reading
     public int Building { get; set; }
 
     public int Room { get; set; }
-
-    [JsonIgnore]
-    public string RoomLabel => $"{Building}栋 {Room}";
-
-    /// <summary>抄表时间距今多久。</summary>
-    [JsonIgnore]
-    public TimeSpan Age => DateTime.Now - MeterTime;
 
     /// <summary>
     /// 这个时刻算哪个整点。<b>基本是向下取整</b>：只有差不到 5 分钟就到下一个整点了才算下一格。

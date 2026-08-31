@@ -31,7 +31,7 @@ public sealed class DormSession : IDisposable
 
     public Summary Summarize() => UsageAggregator.Summarize(Readings.Snapshot(), DateTime.Now);
 
-    /// <summary>把学校那边的充值记录合并到本地一份，返回新增了几笔。同一时间只跑一次。</summary>
+    /// <summary>把学校那边的充值记录合并到本地一份，返回新增或有变动的条数。同一时间只跑一次。</summary>
     public async Task<int> SyncRechargesAsync(RechargeApi api)
     {
         if (_syncing) return 0;

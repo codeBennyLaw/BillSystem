@@ -14,7 +14,7 @@ namespace BillSystem.Services;
 public sealed class RechargeStore
 {
     private readonly List<RechargeRecord> _records = new();
-    private readonly HashSet<string> _seen = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, RechargeRecord> _byOrder = new(StringComparer.Ordinal);
     private readonly object _gate = new();
 
     public string FilePath { get; }
@@ -61,27 +61,62 @@ public sealed class RechargeStore
         lock (_gate) return _records.Sum(r => r.Yuan);
     }
 
-    /// <summary>把服务器那份合并进来，返回本地原先没有的条数。</summary>
+    /// <summary>
+    /// 把服务器那份合并进来，返回<b>新增或有变动</b>的条数（外面靠它决定要不要重画列表）。
+    ///
+    /// 已经有的那一笔<b>照服务器的重写一遍</b>，不是见到订单号就跳过：刚付完钱那一刻学校那边
+    /// 常常还写着"处理中"，过一会儿才翻成"已完成"。只认第一次看到的样子，那条记录就永远停在
+    /// "处理中"上了——付款成功后程序会立刻拉一次记录，撞上的偏偏就是那一刻。
+    /// </summary>
     public int Merge(IEnumerable<RechargeRecord> fromServer)
     {
-        var fresh = new List<RechargeRecord>();
+        int touched = 0;
         lock (_gate)
         {
+            bool reorder = false;
             foreach (RechargeRecord r in fromServer)
             {
-                if (string.IsNullOrEmpty(r.OrderCode) || !_seen.Add(r.OrderCode)) continue;
-                _records.Add(r);
-                fresh.Add(r);
+                if (string.IsNullOrEmpty(r.OrderCode)) continue;
+
+                if (_byOrder.TryGetValue(r.OrderCode, out RechargeRecord? had))
+                {
+                    if (!Differs(had, r)) continue;
+                    reorder |= had.PayTime != r.PayTime;
+                    Overwrite(had, r);
+                }
+                else
+                {
+                    _byOrder[r.OrderCode] = r;
+                    _records.Add(r);
+                    reorder = true;
+                }
+                touched++;
             }
 
-            if (fresh.Count > 0)
+            if (touched > 0)
             {
-                Sort();
+                if (reorder) Sort();
                 Save();
             }
             LastSync = DateTime.Now;
         }
-        return fresh.Count;
+        return touched;
+    }
+
+    /// <summary>服务器那份跟本地这份有出入吗（状态翻了、金额或时间被更正过）。</summary>
+    private static bool Differs(RechargeRecord had, RechargeRecord now) =>
+        had.PayResult != now.PayResult
+        || had.PayTime != now.PayTime
+        || had.PayCent != now.PayCent
+        || had.PayMethod != now.PayMethod;
+
+    /// <summary>就地改字段，不换对象：界面手里拿着的是同一批引用。</summary>
+    private static void Overwrite(RechargeRecord had, RechargeRecord now)
+    {
+        had.PayResult = now.PayResult;
+        had.PayTime = now.PayTime;
+        had.PayCent = now.PayCent;
+        had.PayMethod = now.PayMethod;
     }
 
     /// <summary>内存里按支付时间倒序排（最近的在前），界面直接照这个顺序列。</summary>
@@ -109,7 +144,7 @@ public sealed class RechargeStore
                     if (r.PayTime < prev) ordered = false;
                     prev = r.PayTime;
 
-                    if (_seen.Add(r.OrderCode)) _records.Add(r);
+                    if (_byOrder.TryAdd(r.OrderCode, r)) _records.Add(r);
                 }
                 catch (JsonException)
                 {

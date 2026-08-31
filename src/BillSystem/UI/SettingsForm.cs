@@ -89,7 +89,7 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
 
     private readonly UiToggle _tglNotify = new("弹 Windows 通知");
     private readonly UiButton _btnNotifyTest = new("试一条通知") { Radius = 6f };
-    private readonly UiToggle _tglMail = new("发邮件到下面这些邮箱");
+    private readonly UiToggle _tglMail = new("发邮件");
     private readonly UiButton _btnMailTest = new("试一封邮件") { Radius = 6f };
     private readonly UiLabel _mailResult = new();
     private readonly UiText _newMail = new() { MaxLength = 64, Placeholder = "收件邮箱" };
@@ -360,7 +360,7 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
     private void BuildDorms()
     {
         Section("正在记录的宿舍");
-        if (_draft.Dorms.Count == 0) Hint("还没有宿舍，在下面填楼栋和房号加一间。");
+        if (_draft.Dorms.Count == 0) Hint("还没有宿舍");
         else foreach (Dorm d in _draft.Dorms.ToList()) DormRow(d);
 
         Section("添加宿舍");
@@ -489,7 +489,7 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
         catch (Exception ex)
         {
             if (result.IsDisposed) return;
-            result.Flash(Clip(ex.Message, 30), Theme.Bad, 4000);
+            result.Flash(Fmt.Clip(ex.Message, 30), Theme.Bad, 4000);
         }
         finally
         {
@@ -509,7 +509,7 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
         if (d is null)
         {
             Section("提醒");
-            Hint("还没有宿舍，先到“宿舍”页加一间。");
+            Hint("还没有宿舍");
             MailFromCard();
             return;
         }
@@ -530,7 +530,7 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
         AddToggle(_tglMail, _btnMailTest);
         Result(_mailResult);
 
-        if (d.MailTo.Count == 0) Hint("还没有收件人，在下面加一个。");
+        if (d.MailTo.Count == 0) Hint("还没有收件人");
         else foreach (string to in d.MailTo.ToList()) MailRow(d, to);
         AddMailRow();
 
@@ -659,11 +659,11 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
         try
         {
             await MailAlert.SendTestAsync(probe, d, _summaryOf?.Invoke(d.Key));
-            _mailResult.Flash($"已发出，{d.MailTo.Count} 个收件箱各收一下", Theme.Good, 5000);
+            _mailResult.Flash($"已发出 · {d.MailTo.Count} 个收件箱", Theme.Good, 5000);
         }
         catch (Exception ex)
         {
-            _mailResult.Flash(Clip(ex.Message, 40), Theme.Bad, 5000);
+            _mailResult.Flash(Fmt.Clip(ex.Message, 40), Theme.Bad, 5000);
         }
         finally
         {
@@ -690,7 +690,7 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
     {
         Section("没在记录名单里的数据");
         List<DormFiles> orphans = DormFiles.Orphans(_draft);
-        if (orphans.Count == 0) Hint("数据目录里没有多余的记录文件。");
+        if (orphans.Count == 0) Hint("没有多余的记录文件");
         else foreach (DormFiles f in orphans) OrphanRow(f);
 
         Section("数据目录");
@@ -844,8 +844,6 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
 
     /// <summary>填错时那句话：说完自己淡走，不赖在页面上。</summary>
     private static void Warn(UiLabel lb, string text) => lb.Flash(text, Theme.Warn, 3000);
-
-    private static string Clip(string s, int max) => s.Length <= max ? s : s[..max] + "…";
 
     // ---------- 底图 / 取值 ----------
 

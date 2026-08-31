@@ -39,6 +39,9 @@ internal static class Program
 
         ApplicationConfiguration.Initialize();
 
+        // 滚轮按鼠标位置派给图表 / 记录列表，不跟着键盘焦点走
+        Wheel.Install();
+
         // 让托盘气泡以"宿舍电费助手"的身份进 Windows 通知中心
         Interop.Win32.SetAppId("BillSystem.WyuElectricity");
 

@@ -264,8 +264,7 @@ internal sealed class TrayContext : ApplicationContext
         {
             if (s.MailFailed) return;
             s.MailFailed = true;
-            Notify($"{s.Dorm.Short} 的低电量邮件没发出去",
-                $"{ex.Message}\n可以到设置里点“试一封邮件”看看。", ToolTipIcon.Warning);
+            Notify($"{s.Dorm.Short} 的低电量邮件没发出去", ex.Message, ToolTipIcon.Warning);
         }
     }
 
@@ -336,8 +335,8 @@ internal sealed class TrayContext : ApplicationContext
         // 试邮件里要带上"这一间眼下剩多少"，所以按房号把汇总现算给设置窗口
         using var dlg = new SettingsForm(_cfg, _api,
             key => _sessions.FirstOrDefault(s => s.Dorm.Key == key)?.Summarize());
-        dlg.TestNotifyRequested += d => Notify("这就是低电量提醒的样子",
-            $"{d.Short} 剩余电量低于阈值时，就会弹一条这样的通知。", ToolTipIcon.Info);
+        dlg.TestNotifyRequested += d => Notify("测试通知",
+            $"能看到这条，{d.Short} 的低电量提醒就弹得出来。", ToolTipIcon.Info);
 
         // 点了保存就立刻落地，窗口还开着，不用为了看效果先把设置关掉
         dlg.Saved += () =>

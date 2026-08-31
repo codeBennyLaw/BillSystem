@@ -86,11 +86,12 @@ public sealed class Summary
 /// <summary>
 /// 把"累计用电量"的整点快照换算成各时间粒度的用电量。
 ///
-/// 关键一点：<b>用电量摊在两次抄表之间，不是两个整点之间</b>。学校的电表两三个小时才上传
-/// 一次读数（<see cref="Reading.MeterTime"/>），程序却是每个整点查一次，中间几次查到的累计值
-/// 一模一样。直接拿相邻整点相减就会变成"这个钟 2 度、下个钟 0 度"的锯齿。所以先按抄表时间
-/// 把重复的读数收拢掉（<c>Samples</c>），再把两次抄表之间的增量按时间长度<b>按比例摊到</b>
-/// 它跨过的每一格：小时曲线代表"这段时间的平均功率"，日/月/年的合计完全准确。
+/// 关键一点：<b>用电量摊在两次抄表之间，不是两个整点之间</b>。电表多久上传一次读数是它自己的事
+/// （<see cref="Reading.MeterTime"/>，有时一个钟好几次，有时好几个钟都不动），程序却是掐着钟点查的，
+/// 中间几次查到的累计值会一模一样。直接拿相邻整点相减就会变成"这个钟 2 度、下个钟 0 度"的锯齿。
+/// 所以先按抄表时间把重复的读数收拢掉（<c>Samples</c>），再把两次抄表之间的增量按时间长度
+/// <b>按比例摊到</b>它跨过的每一格：小时曲线代表"这段时间的平均功率"，日/月/年的合计完全准确。
+/// 整套算法不假设抄表间隔是多少，间隔忽长忽短也算得对。
 ///
 /// 最后一次抄表之后的那几格标成未覆盖（画成空白），只盖到半格的标成 <see cref="Bucket.Partial"/>。
 /// </summary>
@@ -247,8 +248,8 @@ public static class UsageAggregator
     }
 
     /// <summary>
-    /// 充值标在"剩余电量涨上去的那一格"上：钱是这个钟付的，但电表两三个小时才抄一次，
-    /// 柱子跳上去往往是后一格的事。月和年粒度直接标付款那一格——那点延迟在这个尺度上看不见，
+    /// 充值标在"剩余电量涨上去的那一格"上：钱是这个钟付的，但要等电表下次上传读数才看得见，
+    /// 柱子跳上去往往是后面某一格的事。月和年粒度直接标付款那一格——那点延迟在这个尺度上看不见，
     /// 往后找反倒会把月底那几笔挪到下个月去。
     /// </summary>
     private static void MarkRecharges(
@@ -271,29 +272,31 @@ public static class UsageAggregator
     }
 
     /// <summary>
-    /// 从付款那一格往后找剩余电量跳上去的那一格，最多找 4 格。知道这一笔<b>该充进来多少度</b>
-    /// （金额 ÷ 电价），就挑涨幅离它最近的那一格——光看"涨了没有"会被半路的小波动骗走。
-    /// 涨幅不要求够数：同一格里用掉的电会先吃掉一部分。都没涨就标在付款那一格。
+    /// 从付款那一格往后找剩余电量涨上去的那一格。<b>按抄表次数找，不按格数找</b>：抄表间隔不固定，
+    /// 写死"往后 N 格"会在间隔长的时候把三角丢回付款那一格。剩余电量没变的格子就是还没新读数，
+    /// 跳过；只看付款之后头两次抄表——第一次可能正好抄在到账之前。
+    /// 知道这一笔<b>该充进来多少度</b>（金额 ÷ 电价），就挑涨幅离它最近的那一格，
+    /// 光看"涨了没有"会被半路的小波动骗走。涨幅不要求够数：同一格里用掉的电会先吃掉一部分。
     /// </summary>
     private static int JumpBucket(List<Bucket> buckets, int pay, double kwh)
     {
-        int best = -1;
+        int best = -1, reads = 0;
         double bestGap = double.MaxValue;
 
-        for (int k = pay; k < buckets.Count && k <= pay + 4; k++)
+        double? prev = null;
+        for (int j = pay - 1; j >= 0; j--)
+            if (buckets[j].Remaining is { } pv) { prev = pv; break; }
+
+        for (int k = pay; k < buckets.Count && reads < 2; k++)
         {
             if (buckets[k].Remaining is not { } cur) continue;
+            if (prev is not { } p0) { prev = cur; continue; }   // 这一格就是这张表的开头，没得比
+            if (Math.Abs(cur - p0) < 0.005) continue;           // 值没动，这一格没新读数
 
-            double? prev = null;
-            for (int j = k - 1; j >= 0; j--)
-                if (buckets[j].Remaining is { } pv) { prev = pv; break; }
-
-            // 前面没读数可比（这一格就是这张表的开头）：涨幅算 0，真涨上去的格子优先
-            double rise = prev is { } p0 ? cur - p0 : 0;
-            if (prev is not null && rise <= 0.005) continue;
-
-            double gap = Math.Abs(rise - kwh);
-            if (gap < bestGap) { bestGap = gap; best = k; }
+            reads++;
+            prev = cur;
+            double gap = Math.Abs(cur - p0 - kwh);
+            if (cur > p0 && gap < bestGap) { bestGap = gap; best = k; }
         }
 
         return best >= 0 ? best : pay;

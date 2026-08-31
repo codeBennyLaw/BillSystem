@@ -132,7 +132,7 @@ internal static class SelfTest
         Check("漏采三格各 1.00 度", spread.Take(3).All(b => Math.Abs(b.Usage - 1.0) < 1e-9),
             string.Join(",", spread.Take(3).Select(b => b.Usage.ToString("0.###"))));
 
-        // ---------- 学校两个钟才抄一次表：中间那次整点读数跟上次一模一样 ----------
+        // ---------- 间隔里的整点读数跟上次一模一样 ----------
         // 直接相减会变成"一个钟 2 度、下一个钟 0 度"的锯齿，增量得摊在两次抄表之间
 
         var lag = new List<Reading>
@@ -142,10 +142,10 @@ internal static class SelfTest
             Rt(day.AddHours(3), day.AddHours(3), 102, 28),
         };
         List<Bucket> even = UsageAggregator.Build(lag, Granularity.Hour, day.AddHours(1), day.AddHours(5));
-        Check("两钟一抄表时两个小时各 1.00 度",
+        Check("隔了两个钟才抄表时两个小时各 1.00 度",
             Math.Abs(even[0].Usage - 1.0) < 1e-9 && Math.Abs(even[1].Usage - 1.0) < 1e-9,
             string.Join(",", even.Select(b => b.Usage.ToString("0.###"))));
-        Check("两钟一抄表不会出现 0 用电的锯齿",
+        Check("不会出现 0 用电的锯齿",
             even.Take(2).All(b => b.Covered && b.Usage > 0.5));
         Check("整段合计还是 2 度", Math.Abs(even.Sum(b => b.Usage) - 2) < 1e-9);
         Check("抄表之后那两格没数据", !even[2].Covered && !even[3].Covered);
@@ -240,6 +240,17 @@ internal static class SelfTest
             lateJump, Granularity.Hour, day.AddHours(1), day.AddHours(6), paid);
         Check("小波动骗不走那一笔充值", late[2].Recharged && !late[1].Recharged,
             string.Join(",", late.Select(b => b.RechargeYuan.ToString("0.#"))));
+
+        // 抄表间隔说不准：这次隔了 8 个钟才抄，三角要跟到真涨上去那一格，不能因为隔得远就落回付款格
+        var slowMeter = new List<Reading>
+        {
+            Rt(day.AddHours(1), day.AddHours(1), 100, 10),
+            Rt(day.AddHours(9), day.AddHours(9), 101, 100),
+        };
+        List<Bucket> slow = UsageAggregator.Build(
+            slowMeter, Granularity.Hour, day.AddHours(1), day.AddHours(11), paid);
+        Check("隔很久才抄表也标在涨上去那一格", slow[7].Recharged && !slow[1].Recharged,
+            string.Join(",", slow.Select(b => b.RechargeYuan.ToString("0.#"))));
 
         CheckStore(Check);
         CheckRechargeStore(Check);
@@ -563,7 +574,7 @@ internal static class SelfTest
 
     /// <summary>
     /// 落到文件里得是正序（最早的在第一行）。老文件是倒序的，载入时应该自己理顺。
-    /// 用一对假房号，跑完删文件。
+    /// 顺带查同一单状态从"处理中"翻成"已完成"时本地跟不跟着改。用一对假房号，跑完删文件。
     /// </summary>
     private static void CheckRechargeStore(Action<string, bool, string> check)
     {
@@ -601,6 +612,25 @@ internal static class SelfTest
             check("重载后按订单号去重", again.Count == 3, again.Count.ToString());
             check("载入时把倒序文件理成正序", FirstOrder(path) == "A", FirstOrder(path));
             check("载入时把重复行清掉", Lines(path) == 3, Lines(path).ToString());
+
+            // ---------- 状态翻了要跟着改 ----------
+
+            // 刚付完那一刻学校那边写的还是"处理中"，过一会儿才翻成"已完成"
+            RechargeRecord pending = Pay("P", late.AddDays(1));
+            pending.PayResult = "处理中";
+            check("先收下一笔处理中的", again.Merge(new[] { pending }) == 1,
+                again.Snapshot()[0].PayResult);
+
+            RechargeRecord settled = Pay("P", late.AddDays(1));
+            check("同一单状态翻了算有变动", again.Merge(new[] { settled }) == 1, "");
+            check("不会多出一笔", again.Count == 4, again.Count.ToString());
+            check("列表里跟着改成已完成",
+                again.Snapshot().First(r => r.OrderCode == "P").PayResult == "已完成",
+                again.Snapshot().First(r => r.OrderCode == "P").PayResult);
+            check("落盘的也是已完成",
+                new RechargeStore(996, 9996).Snapshot().First(r => r.OrderCode == "P").PayResult == "已完成",
+                "");
+            check("状态没变就不算有变动", again.Merge(new[] { settled }) == 0, "");
         }
         catch (Exception ex)
         {
@@ -670,7 +700,7 @@ internal static class SelfTest
         Room = 422,
     };
 
-    /// <summary>整点和抄表时间分开给：学校两三个钟才抄一次表，这两个时间平时是不一样的。</summary>
+    /// <summary>整点和抄表时间分开给：抄表间隔不固定，这两个时间平时是不一样的。</summary>
     private static Reading Rt(DateTime slot, DateTime meter, double used, double remain) => new()
     {
         SlotTime = slot,

@@ -278,7 +278,8 @@ internal static class DevShot
                 PayTime = t,
                 PayCent = yuan * 100,
                 PayMethod = i % 5 == 4 ? "card" : "code",
-                PayResult = "已完成",
+                // 最近那一笔留成"处理中"：出图时顺便看一眼状态那列的颜色对不对
+                PayResult = i == 0 ? "处理中" : "已完成",
                 Building = 999,
                 Room = 9999,
             });
@@ -289,7 +290,7 @@ internal static class DevShot
 
     /// <summary>
     /// 铺一份 40 天的假读数，返回每一次"剩余电量涨上去"（也就是充了值）的时刻。
-    /// 照学校那边的真实节奏：<b>两个钟才抄一次表</b>，中间那个整点查到的是同一份读数——
+    /// 抄表间隔照真实的样子编成忽长忽短（1~4 个钟），间隔里查到的是同一份读数——
     /// 出图正好能看出程序有没有把这种重复读数收拢掉。
     /// </summary>
     private static List<DateTime> Seed(ReadingStore store)
@@ -305,13 +306,13 @@ internal static class DevShot
 
         while (t <= end)
         {
-            // 到点了才换一份新读数，中间那一个整点查到的跟上次一模一样
+            // 到点了才换一份新读数，间隔里查到的跟上次一模一样
             if (t >= nextMeter)
             {
                 meterAt = t.AddMinutes(-rnd.Next(6, 40));   // 抄表比整点早一点
                 meterUsed = Math.Round(used, 2);
                 meterRemain = Math.Round(remain, 2);
-                nextMeter = t.AddHours(2);
+                nextMeter = t.AddHours(1 + rnd.Next(4));
             }
 
             store.TryAdd(new Reading
