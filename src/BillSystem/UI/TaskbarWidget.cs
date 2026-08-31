@@ -7,16 +7,10 @@ namespace BillSystem.UI;
 
 /// <summary>
 /// 任务栏最左侧那一条：紧凑的两行读数（剩余电量 / 抄表时间，可选今日 / 日均）。
-/// <b>只有字，没有底</b>——窗口是分层窗口（<c>WS_EX_LAYERED</c>），整块位图连 alpha 一起交给
-/// 系统合成，笔画之外的地方是真透明的，看着就是任务栏上多了几个字。
-///
-/// 这么做顺带治了老毛病：普通窗口的画面得靠自己收到 WM_PAINT 才补，任务栏在上面重画一次
-/// 就能把它擦没了，得等切个窗口才回来。分层窗口的画面存在 DWM 那边，谁在上面画都擦不掉。
-///
-/// 位置上是一个独立的置顶小窗，但会把自己认到 <c>Shell_TrayWnd</c> 名下（owner）：系统保证
-/// 窗口画在自己 owner 的上面，所以切换应用时任务栏被抬到最前，它是跟着一起上来的。万一这条
-/// 路在某台机器上不管用（发现自己被别的窗口埋了两秒还没出来），就退回自己定时抢 Z 序。
-/// 位置跟着任务栏窗口的真实矩形走，任务栏自动隐藏或前台是全屏窗口时，自己挪到屏幕外让开。
+/// <b>只有字，没有底</b>——窗口是分层窗口（<c>WS_EX_LAYERED</c>），画面存在 DWM 那边，
+/// 别的窗口在上面画都擦不掉，所以不会"闪一下没了、切个窗口才回来"。
+/// 又把自己认到 <c>Shell_TrayWnd</c> 名下（owner），任务栏被抬到最前时它跟着一起上来；
+/// 这条路在某台机器上不好使就退回自己定时抢 Z 序。
 /// </summary>
 internal sealed class TaskbarWidget : Form
 {
@@ -49,7 +43,6 @@ internal sealed class TaskbarWidget : Form
     private Win32.WinEventProc? _fgProc;
     private IntPtr _fgHook;
 
-    /// <summary>任务栏是浅色还是深色：字的颜色跟着系统主题走（任务栏本来也跟着它走）。</summary>
     private bool _light;
     private DateTime _lightChecked = DateTime.MinValue;
 
@@ -109,9 +102,8 @@ internal sealed class TaskbarWidget : Form
     }
 
     /// <summary>
-    /// 认到任务栏名下。认上以后 Z 序就是系统在管了：任务栏被抬到最前，这个窗口跟着一起上来，
-    /// 中间没有"被盖住又被顶回来"的那一帧。认不上（Win11 任务栏改版频繁）就退回原来的做法——
-    /// 听前台切换事件自己顶回去，会有一点闪，但至少不会被埋掉。
+    /// 认到任务栏名下，Z 序就交给系统管了。认不上（Win11 任务栏改版频繁）
+    /// 就退回听前台切换事件自己顶回去。
     /// </summary>
     private void Adopt()
     {
@@ -129,7 +121,7 @@ internal sealed class TaskbarWidget : Form
     }
 
     /// <summary>
-    /// 切前台窗口的当下要办两件事：全屏程序上来了就赶紧让开；新窗口压在自己身上就立刻顶回去
+    /// 切前台窗口的当下办两件事：全屏程序上来了就让开；新窗口压在自己身上就立刻顶回去
     /// （等定时器那一拍已经看得出闪了）。
     /// </summary>
     private void HookForeground()
@@ -160,12 +152,9 @@ internal sealed class TaskbarWidget : Form
         Render();
     }
 
-    /// <summary>组件显示的是主界面上正看着的那一间，悬停卡的标题也跟着换。</summary>
     public void SetDorm(Dorm? dorm) => _dorm = dorm;
 
-    /// <summary>
-    /// 开发出图用（--screenshot）：按给定高度定尺寸、留在原地渲染，不去贴任务栏。
-    /// </summary>
+    /// <summary>开发出图用（--screenshot）：按给定高度定尺寸、留在原地渲染，不去贴任务栏。</summary>
     internal void DevFreeze(int height)
     {
         _frozen = true;
@@ -178,10 +167,6 @@ internal sealed class TaskbarWidget : Form
     /// <summary>开发出图用：把组件自己那张悬停卡拿去画，免得出图时另抄一份内容。</summary>
     internal WidgetTip DevTip() => _tip;
 
-    /// <summary>
-    /// 每 0.25 秒查一次：explorer 重启过就重新认一次，位置被挤走就摆回去，
-    /// 顺手看看自己有没有被别的窗口埋掉、跟一下系统主题、管悬停卡。
-    /// </summary>
     private void Keep()
     {
         // owner 没了自己也会被销毁（explorer 重启），WinForms 这边只会看到句柄不见了
@@ -205,10 +190,7 @@ internal sealed class TaskbarWidget : Form
     }
 
     /// <summary>
-    /// 盯着自己有没有被埋掉。认在任务栏名下的时候 Z 序本该由系统包办，可 Win11 的任务栏改版
-    /// 频繁，真出了岔子的表现就是用户说的"闪一下没了、切个窗口才回来"——所以还是自己看一眼：
-    /// 埋着就立刻顶回去，连着两秒顶不动就说明"认 owner"这条路在这台机器上不好使，
-    /// 干脆松开、退回定时抢 Z 序。没被埋的时候一次 SetWindowPos 都不多发。
+    /// 埋着就顶回去；连着两秒顶不动说明"认 owner"这条路在这台机器上不好使，松开退回定时抢 Z 序。
     /// </summary>
     private void Unbury()
     {
@@ -232,9 +214,8 @@ internal sealed class TaskbarWidget : Form
     }
 
     /// <summary>
-    /// 正中那一点归不归自己：拿它问系统"这块屏幕现在是谁的窗口"。分层窗口是按 alpha 判定的，
-    /// 整块铺的那层 alpha=1 在这儿正好用得上——没人压着就该问到自己。
-    /// 自己的右键菜单弹出来时会盖住这一点，那不算被埋。
+    /// 正中那一点归不归自己：分层窗口按 alpha 判定命中，整块铺的那层 alpha=1 在这儿正好用得上。
+    /// 自己的右键菜单盖住这一点不算被埋。
     /// </summary>
     private bool Covered()
     {
@@ -247,10 +228,7 @@ internal sealed class TaskbarWidget : Form
         return top != IntPtr.Zero && top != Handle;
     }
 
-    /// <summary>
-    /// 只改 Z 序、不动位置大小——反复重设位置会把悬停卡和系统气泡挤掉。
-    /// 认在任务栏名下时平时不插手（<paramref name="force"/> 是发现被埋了的那一下）。
-    /// </summary>
+    /// <summary>只改 Z 序、不动位置大小——反复重设位置会把悬停卡和系统气泡挤掉。</summary>
     private void Raise(bool force = false)
     {
         if (_away || _frozen || !Visible || !IsHandleCreated) return;
@@ -261,10 +239,7 @@ internal sealed class TaskbarWidget : Form
         if (_tip.Visible) _tip.Raise();
     }
 
-    /// <summary>
-    /// 前台是不是占满整个屏幕的窗口（全屏游戏、全屏播放器）。任务栏这时候会自己躲开，
-    /// 组件是置顶窗口不会，得自己跟着躲。
-    /// </summary>
+    /// <summary>前台是不是全屏窗口（全屏游戏、播放器）。任务栏这时会自己躲开，置顶的组件不会。</summary>
     private static bool FullscreenAhead()
     {
         IntPtr fg = Win32.GetForegroundWindow();
@@ -349,7 +324,6 @@ internal sealed class TaskbarWidget : Form
             x, y, w, h, Win32.SWP_NOACTIVATE);
     }
 
-    /// <summary>刷新显示内容。</summary>
     public void UpdateData(PollStatus status, Summary? summary)
     {
         Reading? r = status.Latest;
@@ -385,12 +359,21 @@ internal sealed class TaskbarWidget : Form
     }
 
     /// <summary>
-    /// 悬停卡的显示时机自己盯：组件是不激活的工具窗口，靠 MouseEnter/MouseLeave 经常收不到事件，
-    /// 直接每一拍看鼠标在不在自己身上最可靠。
+    /// 悬停卡的显示时机自己盯：组件是不激活的工具窗口，MouseEnter/MouseLeave 经常收不到。
     /// </summary>
     private void SyncTip()
     {
-        if (_frozen || _away || !Visible || !IsHandleCreated) return;
+        if (_frozen) return;
+
+        // 组件自己让开了（任务栏自动隐藏、前台是全屏窗口）或者被关掉了，
+        // 那张卡得跟着收走——它是鼠标穿透的置顶窗口，留在屏幕上点都点不掉
+        if (_away || !Visible || !IsHandleCreated)
+        {
+            _hoverSince = null;
+            _tipMuted = false;
+            if (_tip.Visible) _tip.HideTip();
+            return;
+        }
 
         Rectangle rc = ScreenRect();
         bool over = rc.Width > 0 && rc.Contains(Cursor.Position);
@@ -437,8 +420,7 @@ internal sealed class TaskbarWidget : Form
 
     /// <summary>
     /// 量字画字都走 GDI+ 这一套排版参数。<b>不能用 <c>TextRenderer</c></b>——那条路是 GDI 画的，
-    /// 出来的像素 alpha 一律是 0，推给分层窗口就是一片透明，什么都看不见。
-    /// 量和画共用同一套度量，排版才不会一边量宽一边画窄。
+    /// 出来的像素 alpha 一律是 0，推给分层窗口就是一片透明。
     /// </summary>
     private static readonly StringFormat Fmt = new(StringFormat.GenericTypographic)
     {
@@ -460,10 +442,6 @@ internal sealed class TaskbarWidget : Form
     private Color SubColor => _light ? Color.FromArgb(0x4B, 0x51, 0x5C) : Color.FromArgb(0x9B, 0xA3, 0xB2);
     private Color AccentColor => _light ? Color.FromArgb(0x18, 0x5A, 0xC8) : Theme.Accent;
 
-    /// <summary>
-    /// 字底下描的那圈淡影。底下是真透明的，任务栏什么颜色、半透明透出来什么壁纸都说不准，
-    /// 描一圈反色的影子才不至于跟背景糊在一起。
-    /// </summary>
     private Color HaloColor => _light ? Color.FromArgb(170, 255, 255, 255) : Color.FromArgb(150, 0, 0, 0);
 
     private Color RemainColor
@@ -476,7 +454,6 @@ internal sealed class TaskbarWidget : Form
         }
     }
 
-    /// <summary>浮窗和"剩余"那一格的配色照正显示着这一间的阈值来。</summary>
     private double LowThreshold => _dorm?.LowThreshold ?? 0;
 
     private List<Cell> Column1() => new()
@@ -526,7 +503,7 @@ internal sealed class TaskbarWidget : Form
         }
     }
 
-    /// <summary>系统主题两秒对一次：字的深浅跟着它走，任务栏本来也是跟着它变的。</summary>
+    /// <summary>系统主题两秒对一次：字的深浅跟着它走。</summary>
     private void RefreshTheme()
     {
         if ((DateTime.UtcNow - _lightChecked).TotalSeconds < 2) return;
@@ -539,9 +516,8 @@ internal sealed class TaskbarWidget : Form
     }
 
     /// <summary>
-    /// 把这一帧整块推给系统。分层窗口的画面不靠 WM_PAINT——推一次就存在 DWM 那边，
-    /// 别的窗口在上面画多少下都擦不掉，也就没有"闪一下没了、切个窗口才回来"那回事。
-    /// 内容、尺寸、主题变了才推一次，平时一帧都不多画。
+    /// 把这一帧整块推给系统。分层窗口的画面不靠 WM_PAINT，推一次就存在 DWM 那边；
+    /// 内容、尺寸、主题变了才推一次。
     /// </summary>
     private void Render()
     {
@@ -572,10 +548,7 @@ internal sealed class TaskbarWidget : Form
         Render();
     }
 
-    /// <summary>
-    /// 只有出图（<see cref="DevFreeze"/>）才走到这里：那时窗口是普通窗口，得自己铺个底，
-    /// 不然 PNG 上一片透明，看不出这几个字在任务栏上是什么样。
-    /// </summary>
+    /// <summary>只有出图（<see cref="DevFreeze"/>）才走到这里：那时是普通窗口，得自己铺个底。</summary>
     protected override void OnPaint(PaintEventArgs e)
     {
         if (!_frozen) return;
@@ -583,7 +556,6 @@ internal sealed class TaskbarWidget : Form
         Draw(e.Graphics, Width, Height);
     }
 
-    /// <summary>画内容本身：左边一条竖色块 + 一两列读数 + 右上角的状态点。底是调用方铺的。</summary>
     private void Draw(Graphics g, int w, int h)
     {
         g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
@@ -592,7 +564,7 @@ internal sealed class TaskbarWidget : Form
 
         if (_fontValue is null || _fontLabel is null) BuildFonts(Math.Max(18, h));
 
-        // 最左边一条细色块，电量见底时就是红的，扫一眼就知道
+        // 最左边一条细色块：电量见底就是红的
         using (var bar = new SolidBrush(RemainColor))
         using (var path = Theme.RoundedRect(new RectangleF(1, h * 0.22f, 2.5f, h * 0.56f), 1.25f))
             g.FillPath(bar, path);
@@ -641,8 +613,8 @@ internal sealed class TaskbarWidget : Form
     private static readonly PointF[] Halo = { new(-1, 0), new(1, 0), new(0, -1), new(0, 1) };
 
     /// <summary>
-    /// 一段字：先在四周描一圈反色淡影，再把字本身压上去。字底下是真透明的，
-    /// 任务栏什么色、半透明透出来什么壁纸都说不准，光靠字自己的颜色总会有糊掉的时候。
+    /// 一段字：先在四周描一圈反色淡影，再把字压上去。底下是真透明的，任务栏什么色、
+    /// 透出来什么壁纸都说不准，光靠字自己的颜色总有糊掉的时候。
     /// </summary>
     private void Glyph(Graphics g, string s, Font f, RectangleF box, Color c)
     {

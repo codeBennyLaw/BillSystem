@@ -6,16 +6,12 @@ namespace BillSystem.UI;
 
 /// <summary>
 /// 设置窗口，分四页：宿舍 / 提醒 / 组件 / 数据。所有改动先记在一份配置副本上，
-/// 点"保存"才写回真正的配置并<b>立刻生效</b>——窗口留在原来那一页上，接着改接着存；
-/// 点"关闭"或直接关窗口，没存过的那些改动就当没发生。
+/// 点"保存"才写回真正的配置并立刻生效——窗口留在原来那一页上，接着改接着存。
 ///
-/// 提醒页上只有发件邮箱是几间共用的，<b>什么时候提醒（剩多少度、还能用几天）和怎么提醒
-/// （弹不弹通知、发不发邮件、发到哪几个邮箱）都是按间配的</b>，用切换器挑哪一间。
-///
-/// 每页的东西都是切页时重新摆的，所以增删宿舍、增删收件人只要改副本再重摆一次。
-/// 输入控件本身是常驻字段（切页只从 Controls 里摘下来，不销毁），填的值一直留着，保存时统一收上来。
-/// 排版是 iOS 那种"分组卡"：每组一张玻璃卡，组名写在卡外面。卡画在窗口底图上
-/// （见 <see cref="Theme.IBackdropHost"/>），里面的控件贴的就是这张合成图，接缝才对得上。
+/// 提醒页上只有发件邮箱是几间共用的，<b>什么时候提醒、怎么提醒都是按间配的</b>。
+/// 每页的东西都是切页时重新摆的，输入控件本身是常驻字段（切页只从 Controls 里摘下来，
+/// 不销毁），填的值一直留着。分组卡画在窗口底图上（见 <see cref="Theme.IBackdropHost"/>），
+/// 里面的控件贴的就是这张合成图，接缝才对得上。
 /// </summary>
 internal sealed class SettingsForm : Form, Theme.IBackdropHost
 {
@@ -28,6 +24,14 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
     private const int TestBtnW = 104;
     private const int DelBtnW = 60;
     private const int ContentTop = 58;          // 分页条底下从这儿开始排
+    private const int SwapTop = 50;             // 换页交接图从这儿盖起（分页条不跟着淡）
+
+    /// <summary>
+    /// 底图一次按这个高度画好。窗口高度是跟着页里的内容变的，要是底图跟着窗口尺寸走，
+    /// 每换一页都得重画一整张（几团 <see cref="PathGradientBrush"/>，还顺手把缓存挤空）。
+    /// 比最高那一页再高一截，用多少裁多少。
+    /// </summary>
+    private const int BackdropH = 760;
 
     private enum Page
     {
@@ -116,6 +120,15 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
     private int _barY;
     private Bitmap? _backdrop;
 
+    /// <summary>眼下摆的是哪一页。换页才做那下交接动画，同一页重摆不做。</summary>
+    private Page _page = Page.Dorms;
+
+    /// <summary>正在淡的那张交接图。</summary>
+    private PageSwap? _swap;
+
+    /// <summary>窗口高度：换页时滑过去。</summary>
+    private readonly Anim _hA;
+
     public SettingsForm(AppConfig cfg, ElectricityApi api, Func<string, Summary?>? summaryOf = null)
     {
         _cfg = cfg;
@@ -136,6 +149,7 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
         DoubleBuffered = true;
         ClientSize = new Size(W, 520);
         Theme.ApplyDarkChrome(this);
+        _hA = new Anim(this, 520, 260, ApplyHeight);
 
         foreach (Control c in new Control[]
                  {
@@ -177,14 +191,12 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
         Controls.Add(_saved);
     }
 
-    /// <summary>
-    /// 保存：值写回真配置、外面立刻跟上，<b>窗口留在当前页</b>，接着改接着存。
-    /// </summary>
+    /// <summary>保存：值写回真配置、外面立刻跟上，<b>窗口留在当前页</b>。</summary>
     private void Apply()
     {
         if (!SaveValues()) return;
 
-        _saved.Text = $"已保存 {DateTime.Now:HH:mm}";
+        _saved.Flash($"已保存 {DateTime.Now:HH:mm}", Theme.Good, 3200);
         Saved?.Invoke();
     }
 
@@ -207,7 +219,6 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
         {
             if (tag is not string key || key == _alertKey) return;
             _alertKey = key;
-            _mailResult.Text = "";
             BeginInvoke(() => ShowPage(Page.Alert));
         };
 
@@ -229,6 +240,18 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
     private void ShowPage(Page p)
     {
         StoreAlertSpins();        // 重摆之前先把阈值收进副本，不然刚调的数就没了
+
+        // 留着不销毁的那两条提示（上一页填错的话、上一封试信的结果）别跟着带到新页上
+        _dormMsg.Text = "";
+        _mailResult.Text = "";
+
+        // 真换页才做交接（同一页只是换了间宿舍就不做：那时候切换器自己正滑着，盖上一张图会把它冻住）
+        bool turning = p != _page && Visible;
+        _swap?.Kill();
+        _swap = null;
+        int from = _barY;
+        Bitmap? before = turning ? RenderPage(from) : null;
+
         SuspendLayout();
         _tabs.Select(p);
 
@@ -241,6 +264,7 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
         _cards.Clear();
         _cardTop = -1;
         _y = ContentTop;
+        _page = p;
 
         switch (p)
         {
@@ -256,9 +280,46 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
         SyncEnabled();
         ResumeLayout();
         Invalidate(true);
+
+        if (before is not null)
+        {
+            int h = Math.Max(from, _barY);
+            _swap = PageSwap.Play(this, new Rectangle(0, SwapTop, W, h - SwapTop),
+                before, RenderPage(from));
+        }
     }
 
-    /// <summary>摆一个控件到当前页上。</summary>
+    /// <summary>
+    /// 把眼下这一页整个画成一张图：底图 + 这一页摆着的控件。
+    /// 兄弟控件之间没法互相透出来，换页想淡入淡出就只能先各画一张，见 <see cref="PageSwap"/>。
+    /// <paramref name="barY"/> 是那一页按钮栏的位置，图只画到那儿——按钮栏两边都一样，不用跟着淡。
+    /// </summary>
+    private Bitmap? RenderPage(int barY)
+    {
+        int h = Math.Max(barY, _barY) - SwapTop;
+        if (h < 1) return null;
+        try
+        {
+            var bmp = new Bitmap(W, h);
+            using (Graphics g = Graphics.FromImage(bmp))
+                g.DrawImage(BackdropImage, new Rectangle(0, 0, W, h),
+                    new Rectangle(0, SwapTop, W, h), GraphicsUnit.Pixel);
+
+            foreach (Control c in _shown)
+            {
+                var at = new Rectangle(c.Left, c.Top - SwapTop, c.Width, c.Height);
+                if (c.Width < 1 || c.Height < 1 || at.Top < 0 || at.Bottom > h) continue;
+                c.DrawToBitmap(bmp, at);
+            }
+            return bmp;
+        }
+        catch
+        {
+            // 画不出来就不做交接动画，页面照样能换
+            return null;
+        }
+    }
+
     private void Put(Control c)
     {
         _shown.Add(c);
@@ -271,15 +332,27 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
     private void LayoutBottomBar()
     {
         int h = Math.Max(320, _y + 54);
-        ClientSize = new Size(W, h);
+
+        // 高度滑过去，不是"啪"地跳一下（第一次摆页面时窗口还没显示，直接就位）
+        if (Visible && IsHandleCreated) _hA.To(h);
+        else _hA.Set(h);
+
+        _backdrop?.Dispose();
+        _backdrop = null;
+    }
+
+    /// <summary>窗口高度动画的每一帧：按钮栏跟着底边走，那条分隔线也跟着挪。</summary>
+    private void ApplyHeight(double v)
+    {
+        int h = Math.Max(1, (int)Math.Round(v));
         _barY = h - 54;
 
         _btnSave.SetBounds(W - 20 - 92, h - 43, 92, 34);
         _btnClose.SetBounds(_btnSave.Left - 10 - 84, h - 43, 84, 34);
         _saved.SetBounds(LabelX, h - 38, _btnClose.Left - 12 - LabelX, 24);
 
-        _backdrop?.Dispose();
-        _backdrop = null;
+        if (ClientSize.Height != h) ClientSize = new Size(W, h);
+        Invalidate();
     }
 
     // ---------- 宿舍 ----------
@@ -331,7 +404,7 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
         if (d.MailEnabled) how.Add($"邮件 {d.MailTo.Count} 个");
         if (how.Count == 0) return "没开提醒";
 
-        // 一行只有 230 像素，两条阈值都写上还要留住"通知 / 邮件"，所以写得紧一点
+        // 一行只有 230 像素，写紧一点
         string when = d.LowDaysThreshold > 0
             ? $"低于 {d.LowThreshold:0.##} 度 / {d.LowDaysThreshold:0.##} 天"
             : $"低于 {d.LowThreshold:0.##} 度";
@@ -389,7 +462,6 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
         _alertKey = d.Key;          // 刚加的这间就是接下来要配提醒的那间
         _newB.Text = "";
         _newR.Text = "";
-        _dormMsg.Text = "";
         BeginInvoke(() => ShowPage(Page.Dorms));
     }
 
@@ -400,7 +472,6 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
         if (_draft.CurrentDorm == d.Key)
             _draft.CurrentDorm = _draft.Dorms.Count > 0 ? _draft.Dorms[0].Key : "";
         if (_alertKey == d.Key) _alertKey = _draft.CurrentDorm;
-        _dormMsg.Text = "";
         BeginInvoke(() => ShowPage(Page.Dorms));
     }
 
@@ -413,14 +484,12 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
         {
             Reading r = await _api.QueryAsync(d.Building, d.Room);
             if (result.IsDisposed) return;
-            result.ForeColor = Theme.Good;
-            result.Text = $"剩余 {r.Remaining:0.00} 度 · 抄表 {r.MeterTime:MM-dd HH:mm}";
+            result.Flash($"剩余 {r.Remaining:0.00} 度 · 抄表 {r.MeterTime:MM-dd HH:mm}", Theme.Good, 6000);
         }
         catch (Exception ex)
         {
             if (result.IsDisposed) return;
-            result.ForeColor = Theme.Bad;
-            result.Text = Clip(ex.Message, 30);
+            result.Flash(Clip(ex.Message, 30), Theme.Bad, 4000);
         }
         finally
         {
@@ -448,13 +517,12 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
         _alertKey = d.Key;
         LoadDormAlert(d);
 
-        // 底下两张卡都是配这一间的，先把"哪一间"摆在最上面
         Section("配哪一间");
         DormPicker(d);
 
         Section("什么时候提醒");
         Row("剩余低于", _threshold, "度", 110);
-        // 这一项是 0 就不看"还能用几天"，只按剩余度数提醒
+        // 这一项是 0 就不看"还能用几天"
         Row("预计可用不足", _daysLeft, "天", 110);
 
         Section("怎么提醒");
@@ -477,7 +545,7 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
         Row("授权码", _mailCode, null, 250);
     }
 
-    /// <summary>配哪一间：两间以上摆切换器，只有一间就写一行房间名（没什么可切的）。</summary>
+    /// <summary>配哪一间：两间以上摆切换器，只有一间就写一行房间名。</summary>
     private void DormPicker(Dorm d)
     {
         if (_draft.Dorms.Count < 2)
@@ -489,9 +557,8 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
             return;
         }
 
-        _segAlertDorm.Clear();
-        foreach (Dorm x in _draft.Dorms) _segAlertDorm.Add(x.Short, x.Key);
-        _segAlertDorm.Select(d.Key);
+        // 名单没变就一格都不动：每换一间宿舍这一页都要重摆，清空重来的话滑块会先弹回第一格
+        _segAlertDorm.SetItems(_draft.Dorms.Select(x => (x.Short, (object)x.Key)), d.Key);
         _segAlertDorm.FitWidth(84);
         _segAlertDorm.SetBounds(LabelX, _y - 2, Math.Min(_segAlertDorm.Width, RightX - LabelX), 30);
         Put(_segAlertDorm);
@@ -508,8 +575,8 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
     }
 
     /// <summary>
-    /// 把两个阈值收回它们属于的那一间。开关和收件人是拨一下就写进副本的，
-    /// 阈值只能这么收（<see cref="_spinsKey"/> 说了为什么）：重摆页面前、保存前各收一次。
+    /// 把两个阈值收回它们属于的那一间：重摆页面前、保存前各收一次
+    /// （<see cref="_spinsKey"/> 说了为什么）。
     /// </summary>
     private void StoreAlertSpins()
     {
@@ -572,7 +639,6 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
 
         d.MailTo.Add(s);
         _newMail.Text = "";
-        _mailResult.Text = "";
         BeginInvoke(() => ShowPage(Page.Alert));
     }
 
@@ -593,13 +659,11 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
         try
         {
             await MailAlert.SendTestAsync(probe, d, _summaryOf?.Invoke(d.Key));
-            _mailResult.ForeColor = Theme.Good;
-            _mailResult.Text = $"已发出，{d.MailTo.Count} 个收件箱各收一下";
+            _mailResult.Flash($"已发出，{d.MailTo.Count} 个收件箱各收一下", Theme.Good, 5000);
         }
         catch (Exception ex)
         {
-            _mailResult.ForeColor = Theme.Bad;
-            _mailResult.Text = Clip(ex.Message, 40);
+            _mailResult.Flash(Clip(ex.Message, 40), Theme.Bad, 5000);
         }
         finally
         {
@@ -716,8 +780,7 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
     }
 
     /// <summary>
-    /// 一行：标签 + 输入框（+ 单位）。<paramref name="trailing"/> 给了就右对齐摆在同一行末尾——
-    /// 验证按钮跟它验证的那一行同高，才看得出是一件事。
+    /// 一行：标签 + 输入框（+ 单位）。<paramref name="trailing"/> 给了就右对齐摆在同一行末尾。
     /// </summary>
     private void Row(string label, Control input, string? hint, int inputWidth = 120,
         Control? trailing = null)
@@ -779,35 +842,38 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
         _y += 16;
     }
 
-    private static void Warn(UiLabel lb, string text)
-    {
-        lb.ForeColor = Theme.Warn;
-        lb.Text = text;
-    }
+    /// <summary>填错时那句话：说完自己淡走，不赖在页面上。</summary>
+    private static void Warn(UiLabel lb, string text) => lb.Flash(text, Theme.Warn, 3000);
 
     private static string Clip(string s, int max) => s.Length <= max ? s : s[..max] + "…";
 
     // ---------- 底图 / 取值 ----------
 
-    /// <summary>窗口底图：柔光背景 + 几张分组玻璃卡 + 按钮栏那条分隔线，每页合成一次。</summary>
+    /// <summary>
+    /// 窗口底图：柔光背景 + 几张分组玻璃卡，换页时重合成一次。
+    /// 按钮栏那条分隔线不画进来——它跟着窗口高度动，画进图里等于每一帧都要重合成一张。
+    /// </summary>
     public Bitmap BackdropImage => _backdrop ??= BuildBackdrop();
 
     private Bitmap BuildBackdrop()
     {
-        var bmp = new Bitmap(Math.Max(1, ClientSize.Width), Math.Max(1, ClientSize.Height));
+        var size = new Size(W, BackdropH);
+        var bmp = new Bitmap(size.Width, size.Height);
         using Graphics g = Graphics.FromImage(bmp);
-        g.DrawImageUnscaled(Theme.Backdrop(ClientSize), 0, 0);
+        g.DrawImageUnscaled(Theme.Backdrop(size), 0, 0);
         g.SmoothingMode = SmoothingMode.AntiAlias;
 
         foreach (RectangleF card in _cards) Theme.Glass(g, card, 16f, 0.05f);
-
-        using var line = new Pen(Color.FromArgb(26, 255, 255, 255));
-        g.DrawLine(line, 0, _barY + 0.5f, W, _barY + 0.5f);
         return bmp;
     }
 
     protected override void OnPaintBackground(PaintEventArgs e)
-        => e.Graphics.DrawImageUnscaled(BackdropImage, 0, 0);
+    {
+        Graphics g = e.Graphics;
+        g.DrawImageUnscaled(BackdropImage, 0, 0);
+        using var line = new Pen(Color.FromArgb(26, 255, 255, 255));
+        g.DrawLine(line, 0, _barY + 0.5f, W, _barY + 0.5f);
+    }
 
     protected override void Dispose(bool disposing)
     {
@@ -846,8 +912,7 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
     }
 
     /// <summary>
-    /// 把界面上的值写进副本，再一次性覆盖到真配置。返回 false 表示这次没存下去。
-    /// 按间存的那几项（通知 / 邮件开关、收件人）拨的时候就已经写进副本了，
+    /// 把界面上的值写进副本，再一次性覆盖到真配置。按间存的那几项拨的时候就已经写进副本了，
     /// 两个阈值靠 <see cref="StoreAlertSpins"/> 收。
     /// </summary>
     private bool SaveValues()

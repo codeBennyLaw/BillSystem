@@ -59,8 +59,7 @@ internal sealed class TrayContext : ApplicationContext
     }
 
     /// <summary>
-    /// 把跑着的宿舍对齐到设置里那份名单：新加的建起来开始轮询，删掉的停掉，
-    /// 留下的把提醒那几项（通知 / 邮件 / 收件人）抄成新填的。
+    /// 把跑着的宿舍对齐到设置里那份名单：新加的建起来开始轮询，删掉的停掉，留下的把提醒抄成新填的。
     /// 停掉只是不再查了，<b>jsonl 一个字都不动</b>——想清理得到设置的"数据"页里手动删。
     /// </summary>
     private void SyncSessions()
@@ -228,7 +227,7 @@ internal sealed class TrayContext : ApplicationContext
         Summary sum = UsageAggregator.Summarize(all, DateTime.Now);
         Dorm d = s.Dorm;
         bool low = r.Remaining <= d.LowThreshold;
-        // 度数还够，但照这个用法撑不到这间设的那个天数就见底（那项是 0 就不看这一条）
+        // 度数还够，但照这个用法撑不到这间设的那个天数（那项是 0 就不看这一条）
         bool soon = sum.RunsOutWithin(d.LowDaysThreshold);
 
         if (low || soon)
@@ -317,7 +316,7 @@ internal sealed class TrayContext : ApplicationContext
 
         if (_rechargeForm is null || _rechargeForm.IsDisposed)
         {
-            _rechargeForm = new RechargeForm(_rechargeApi, cur) { Icon = _trayIcon };
+            _rechargeForm = new RechargeForm(_rechargeApi, _cfg, cur) { Icon = _trayIcon };
             _rechargeForm.PaidSuccessfully += () =>
             {
                 foreach (DormSession s in _sessions) { s.LowNotified = false; s.MailFailed = false; }
@@ -340,8 +339,7 @@ internal sealed class TrayContext : ApplicationContext
         dlg.TestNotifyRequested += d => Notify("这就是低电量提醒的样子",
             $"{d.Short} 剩余电量低于阈值时，就会弹一条这样的通知。", ToolTipIcon.Info);
 
-        // 点了保存就立刻落地，窗口还开着：加了 / 删了宿舍，改了各间的提醒，
-        // 还有组件那几项，改一次生效一次，不用为了看效果先把设置关掉
+        // 点了保存就立刻落地，窗口还开着，不用为了看效果先把设置关掉
         dlg.Saved += () =>
         {
             _widget.ApplyConfig(_cfg);

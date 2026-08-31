@@ -231,12 +231,8 @@ internal static class Win32
 
     /// <summary>
     /// 把一张带 alpha 的位图整块推给分层窗口（<c>WS_EX_LAYERED</c> + <c>UpdateLayeredWindow</c>）。
-    ///
-    /// 好处有两个：一是没画到的地方是<b>真透明</b>，不用去猜背景该填什么色；二是画面存在
-    /// 系统（DWM）那边，别的窗口在上面重画不会把它擦掉——不像普通窗口那样得等 WM_PAINT
-    /// 才补回来，也就没有"闪一下没了、切个窗口又回来"的毛病。
-    ///
-    /// 位置和大小仍旧由 <see cref="SetWindowPos"/> 管，这里只换内容。
+    /// 没画到的地方是<b>真透明</b>；画面存在 DWM 那边，别的窗口在上面重画不会把它擦掉，
+    /// 也就没有"闪一下没了、切个窗口又回来"的毛病。位置和大小仍旧由 <see cref="SetWindowPos"/> 管。
     /// </summary>
     public static bool PushLayered(IntPtr hWnd, Bitmap bmp)
     {

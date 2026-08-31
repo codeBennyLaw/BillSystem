@@ -5,9 +5,8 @@ namespace BillSystem.Models;
 /// <summary>
 /// 一间宿舍：楼栋 + 房号。数据文件名（<c>readings-B43-R422.jsonl</c>）和界面上的房间名都从这儿来。
 ///
-/// 提醒整套都是按间配的：什么时候提醒（剩多少度、还能用几天）、怎么提醒（弹不弹通知、
-/// 发不发邮件、发到哪几个邮箱），各自说各自的。共用的只有那个发件箱，
-/// 见 <see cref="AppConfig.MailFrom"/>。
+/// 提醒整套都是按间配的：什么时候提醒、怎么提醒、发到哪几个邮箱，各自说各自的。
+/// 共用的只有那个发件箱，见 <see cref="AppConfig.MailFrom"/>。
 /// </summary>
 public sealed class Dorm
 {
@@ -75,8 +74,8 @@ public sealed class Dorm
     };
 
     /// <summary>
-    /// 把提醒那几项抄过来（同一个房号才有意义）。设置点了保存之后，
-    /// 已经在后台跑着的那一间靠这个跟上新设置，不用重建、不用重读 jsonl。
+    /// 把提醒那几项抄过来（同一个房号才有意义）：已经在后台跑着的那一间靠这个跟上新设置，
+    /// 不用重建、不用重读 jsonl。
     /// </summary>
     public void CopyAlertsFrom(Dorm o)
     {

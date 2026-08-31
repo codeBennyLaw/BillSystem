@@ -35,8 +35,7 @@ internal static class DevShot
 
         List<DateTime> topUps = Seed(session.Readings);
 
-        // 充值记录跟上面那份假读数里"剩余电量突然涨上去"的时刻对上，
-        // 图表上那几根柱子才跟真程序一个意思
+        // 充值记录跟假读数里"剩余电量突然涨上去"的时刻对上，图上的标记才跟真程序一个意思
         RechargeStore payStore = session.Recharges;
         payStore.Merge(TopUpRecords(topUps));
 
@@ -62,6 +61,10 @@ internal static class DevShot
         var status = new PollStatus { Latest = last, LastSuccess = DateTime.Now, LastAttempt = DateTime.Now };
         form.UpdateStatus(status);
         Save(form, Path.Combine(outDir, "main-day.png"));
+
+        // 卡片折成钱的小窗：离屏渲染里没法真拿鼠标去悬停，让主窗口自己贴一张出来。
+        // 下一张换粒度时 ApplyConfig 会把它收掉，不会跟着后面几张一起入镜
+        Save(form, Path.Combine(outDir, "main-card-tip.png"), form.DevShowTip(1));
 
         cfg.Granularity = Granularity.Hour;
         form.ApplyConfig(cfg);
@@ -113,8 +116,7 @@ internal static class DevShot
         Save(widget, Path.Combine(outDir, "widget.png"));
         widget.Hide();
 
-        // 组件的悬停信息卡：直接拿组件自己那张（内容已经在 UpdateData 里填好），
-        // 出图这边不另抄一份，免得图跟真界面对不上
+        // 组件的悬停信息卡：直接拿组件自己那张（内容已经在 UpdateData 里填好），免得图跟真界面对不上
         WidgetTip tip = widget.DevTip();
         tip.Location = new Point(-4000, -4000);
         tip.Show();
@@ -123,8 +125,7 @@ internal static class DevShot
         Save(tip, Path.Combine(outDir, "widget-tip.png"));
         tip.Hide();
 
-        // 设置窗口：四页各出一张，只画不真的弹出来。
-        // "数据"页列的是名单外的历史文件，先造一间不在名单里的假房号出来
+        // 设置窗口：四页各出一张。"数据"页列的是名单外的历史文件，先造一间不在名单里的假房号出来
         StrayFiles();
         var dlg = new SettingsForm(cfg, api)
         {
@@ -147,8 +148,7 @@ internal static class DevShot
         dlg.Dispose();
 
         // 提醒邮件的排版：两种触发条件各写一份 HTML，浏览器直接打开就能看，不用真发信。
-        // 样张的数字自己凑一套齐的（4.2 度、日均 9.8 度 → 还能用十来个小时），
-        // 拿真读数改一个剩余度数出来的话，"剩 4.2 度"和"还能用 4.8 天"会对不上
+        // 数字自己凑一套齐的——拿真读数改一个剩余度数出来的话，"剩 4.2 度"和"还能用 4.8 天"会对不上
         var lowNow = new Reading
         {
             SlotTime = last.SlotTime,
@@ -178,12 +178,11 @@ internal static class DevShot
         File.WriteAllText(Path.Combine(outDir, "mail-soon.html"),
             MailAlert.LowLetter(dorm, lowNow, mailSummary, belowThreshold: false).Html, utf8);
 
-        // 充值窗口：假记录 + 一张现成的付款码，offline 保证不联网、不下单。
-        // 上面主界面用过的那几笔之外再补一批，好把记录列表填满
+        // 充值窗口：offline 保证不联网、不下单。再补一批假记录，好把记录列表填满
         payStore.Merge(SeedRecharges());
 
         using var payApi = new RechargeApi();
-        var pay = new RechargeForm(payApi, session, offline: true)
+        var pay = new RechargeForm(payApi, cfg, session, offline: true)
         {
             StartPosition = FormStartPosition.Manual,
             Location = new Point(-4000, -4000),
@@ -193,7 +192,7 @@ internal static class DevShot
         pay.DevPose("等待付款 · 这张码还有 4:37");
         Save(pay, Path.Combine(outDir, "recharge.png"));
 
-        // 点"生成付款码"之后弹的那个码窗，同样离屏画
+        // 点"生成付款码"之后弹的那个码窗
         QrDialog qrDlg = pay.DevQrDialog();
         qrDlg.StartPosition = FormStartPosition.Manual;
         qrDlg.Location = new Point(-4000, -4000);
@@ -245,7 +244,7 @@ internal static class DevShot
         File.WriteAllLines(Path.Combine(AppConfig.DataDir, $"recharges-{stray.Key}.jsonl"), pays);
     }
 
-    /// <summary>假读数里每一次"剩余电量涨上去"都配一条充值记录，图表上就是那几根绿柱子。</summary>
+    /// <summary>假读数里每一次"剩余电量涨上去"都配一条充值记录，图表上才标得出那几笔。</summary>
     private static List<RechargeRecord> TopUpRecords(List<DateTime> times)
     {
         var list = new List<RechargeRecord>();
@@ -290,9 +289,8 @@ internal static class DevShot
 
     /// <summary>
     /// 铺一份 40 天的假读数，返回每一次"剩余电量涨上去"（也就是充了值）的时刻。
-    ///
-    /// 照着学校那边的真实节奏来：<b>两个钟才抄一次表</b>，所以中间那个整点查到的是
-    /// 同一个抄表时间、同一个累计值——出图正好能看出程序有没有把这种重复读数收拢掉。
+    /// 照学校那边的真实节奏：<b>两个钟才抄一次表</b>，中间那个整点查到的是同一份读数——
+    /// 出图正好能看出程序有没有把这种重复读数收拢掉。
     /// </summary>
     private static List<DateTime> Seed(ReadingStore store)
     {
@@ -341,7 +339,7 @@ internal static class DevShot
         return topUps;
     }
 
-    private static void Save(Form f, string path)
+    private static void Save(Form f, string path, Control? over = null)
     {
         Anim.FinishAll();   // 别截到过渡动画的中间帧，出图得每次都一样
         f.Refresh();
@@ -349,6 +347,17 @@ internal static class DevShot
         // DrawToBitmap 连标题栏一起画，位图按整窗尺寸开，否则客户区底部会被裁掉
         using var bmp = new Bitmap(Math.Max(1, f.Width), Math.Max(1, f.Height));
         f.DrawToBitmap(bmp, new Rectangle(0, 0, bmp.Width, bmp.Height));
+
+        // 悬浮的小窗盖在别的控件上面，但 DrawToBitmap 是按控件挨个画的、不认 z 序，
+        // 会被后画的兄弟控件糊掉一角——单独再画一遍，位置按客户区在整窗里的偏移算
+        if (over is { Visible: true, Width: > 0, Height: > 0 })
+        {
+            Point client = f.PointToScreen(Point.Empty);
+            var at = new Rectangle(
+                client.X - f.Left + over.Left, client.Y - f.Top + over.Top, over.Width, over.Height);
+            over.DrawToBitmap(bmp, at);
+        }
+
         bmp.Save(path, ImageFormat.Png);
     }
 }

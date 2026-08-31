@@ -22,16 +22,13 @@ internal static class Theme
     public static readonly Color Bad = Color.FromArgb(0xF8, 0x71, 0x71);
     public static readonly Color Remain = Color.FromArgb(0xFB, 0xBF, 0x24);
 
-    /// <summary>剩余电量因为充值涨上去的那一格：跟平时那根金色柱子分开，一眼看得出"这儿充过"。</summary>
+    /// <summary>剩余电量因为充值涨上去的那一格：跟平时那根金色柱子分开。</summary>
     public static readonly Color Recharge = Color.FromArgb(0x35, 0xD6, 0xA4);
 
     /// <summary>背景光斑里那团紫，只用来给玻璃透出点颜色。</summary>
     private static readonly Color Violet = Color.FromArgb(0x7C, 0x5C, 0xFF);
 
-    /// <summary>
-    /// 嵌着真 TextBox 的输入框只能用实色打底——子控件透不出下面的背景，
-    /// 所以取一个跟玻璃面板差不多亮的实色，摆在一起看不出接缝。
-    /// </summary>
+    /// <summary>嵌着真 TextBox 的输入框只能用实色打底，取一个跟玻璃面板差不多亮的。</summary>
     public static readonly Color Field = Color.FromArgb(0x23, 0x27, 0x31);
 
     /// <summary>优先用微软雅黑，没有就退回系统默认无衬线字体。</summary>
@@ -95,20 +92,45 @@ internal static class Theme
         f.HandleCreated += (_, _) => Apply();
     }
 
+    /// <summary>
+    /// 圆角矩形。角上不画 90° 正圆弧，而是照 iOS 那套"连续曲率"来：从直边拐进弯角的曲率是
+    /// 一点点涨上去的（squircle），角看着比正圆角柔和。半径已经顶到短边一半（胶囊、圆点）时
+    /// 退回真圆弧——那种形状两头本来就该是半圆。
+    /// </summary>
     public static GraphicsPath RoundedRect(RectangleF r, float radius)
     {
         var path = new GraphicsPath();
-        float d = Math.Min(radius * 2, Math.Min(r.Width, r.Height));
-        if (d <= 0.1f)
+        float min = Math.Min(r.Width, r.Height);
+        if (min <= 0.1f || radius <= 0.6f)
         {
             path.AddRectangle(r);
             return path;
         }
 
-        path.AddArc(r.Left, r.Top, d, d, 180, 90);
-        path.AddArc(r.Right - d, r.Top, d, d, 270, 90);
-        path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-        path.AddArc(r.Left, r.Bottom - d, d, d, 90, 90);
+        float rad = Math.Min(radius, min / 2f);
+        if (rad >= min / 2f - 0.5f)
+        {
+            float d = rad * 2f;
+            path.AddArc(r.Left, r.Top, d, d, 180, 90);
+            path.AddArc(r.Right - d, r.Top, d, d, 270, 90);
+            path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            path.AddArc(r.Left, r.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+
+        float a = Math.Min(rad * 1.32f, min / 2f);   // 离顶点这么远就开始拐了
+        float k = a * 0.33f;                         // 控制点离顶点多近：越近，曲率涨得越缓
+        float l = r.Left, t = r.Top, rt = r.Right, b = r.Bottom;
+
+        path.AddLine(l + a, t, rt - a, t);
+        path.AddBezier(rt - a, t, rt - k, t, rt, t + k, rt, t + a);
+        path.AddLine(rt, t + a, rt, b - a);
+        path.AddBezier(rt, b - a, rt, b - k, rt - k, b, rt - a, b);
+        path.AddLine(rt - a, b, l + a, b);
+        path.AddBezier(l + a, b, l + k, b, l, b - k, l, b - a);
+        path.AddLine(l, b - a, l, t + a);
+        path.AddBezier(l, t + a, l, t + k, l + k, t, l + a, t);
         path.CloseFigure();
         return path;
     }
@@ -134,9 +156,9 @@ internal static class Theme
     // ---------- 液态玻璃 ----------
     //
     // GDI+ 没有"背景模糊"这种东西（那要拿到窗口后面的像素再做高斯模糊，WinForms 给不了），
-    // 所以这里换个路子：整窗先铺一张自己画的柔光背景（几团大色斑），面板不再用实色，
-    // 而是在同一张背景上压一层半透明暗色 + 自上而下的白色高光 + 一圈亮边 + 顶上一道反光。
-    // 背景本身是渐变加大色斑，透过来的颜色随位置变，看着就有玻璃那股子通透。
+    // 所以换个路子：整窗先铺一张自己画的柔光背景（几团大色斑），面板不用实色，而是在同一张
+    // 背景上压半透明暗色 + 白色高光 + 一圈亮边 + 顶上一道反光。透过来的颜色随位置变，
+    // 看着就有玻璃那股子通透。
 
     /// <summary>玻璃往控件里缩这么多，外面那点地方留给投影。</summary>
     public const float Bleed = 3f;
@@ -147,22 +169,40 @@ internal static class Theme
         Math.Max(1f, c.Width - Bleed * 2f),
         Math.Max(1f, c.Height - Bleed * 2f));
 
+    private const int BackdropCacheMax = 12;
+
+    /// <summary>底图尺寸按这个粒度往上取整，见 <see cref="Backdrop"/>。</summary>
+    private const int BackdropGrain = 48;
+
     private static readonly Dictionary<Size, Bitmap> Backdrops = new();
+
+    /// <summary>缓存里各尺寸的使用顺序，最后一个是刚用过的。</summary>
+    private static readonly List<Size> BackdropAge = new();
 
     /// <summary>
     /// 整窗的柔光背景。同一个尺寸只画一次存起来——每帧重画几团 <see cref="PathGradientBrush"/>
     /// 太慢，而且色斑位置是按比例算死的，所以 <c>--screenshot</c> 每次出的图都一模一样。
+    /// 满了只挤掉最久没用的那一张：悬停信息卡的尺寸跟着行数变，整批扔的话它几下就能把主窗口
+    /// 那张顶掉，下一帧又得整张重画。
+    ///
+    /// 尺寸先按 <see cref="BackdropGrain"/> 往上取整再存：拖着窗口边框改大小时，每差一个像素
+    /// 就是一张新图（一张一千来乘七百的要几十毫秒，还顺手把缓存挤空），取整之后一整段拖动都在
+    /// 复用同一张。画出来的图比要的大一点，多出来的那圈直接裁掉，光斑是化开的，看不出偏移。
     /// </summary>
     public static Bitmap Backdrop(Size size)
     {
-        size = new Size(Math.Max(1, size.Width), Math.Max(1, size.Height));
-        if (Backdrops.TryGetValue(size, out Bitmap? hit)) return hit;
-
-        // 缓存太多张就整批扔掉重来：窗口尺寸只有几种，拖动缩放时才会攒起来
-        if (Backdrops.Count >= 12)
+        size = new Size(Grain(size.Width), Grain(size.Height));
+        if (Backdrops.TryGetValue(size, out Bitmap? hit))
         {
-            foreach (Bitmap old in Backdrops.Values) old.Dispose();
-            Backdrops.Clear();
+            Touch(size);
+            return hit;
+        }
+
+        while (Backdrops.Count >= BackdropCacheMax && BackdropAge.Count > 0)
+        {
+            Size lru = BackdropAge[0];
+            BackdropAge.RemoveAt(0);
+            if (Backdrops.Remove(lru, out Bitmap? old)) old.Dispose();
         }
 
         var bmp = new Bitmap(size.Width, size.Height);
@@ -184,8 +224,18 @@ internal static class Theme
         }
 
         Backdrops[size] = bmp;
+        Touch(size);
         return bmp;
     }
+
+    private static void Touch(Size size)
+    {
+        BackdropAge.Remove(size);
+        BackdropAge.Add(size);
+    }
+
+    private static int Grain(int v)
+        => Math.Max(BackdropGrain, (v + BackdropGrain - 1) / BackdropGrain * BackdropGrain);
 
     /// <summary>一团中间亮、边上化开的圆光斑。</summary>
     private static void Blob(Graphics g, float cx, float cy, float r, Color c, int alpha)
@@ -205,7 +255,7 @@ internal static class Theme
 
     /// <summary>
     /// 自己另画一张底图的窗口（比如设置里那几张分组卡）实现这个，
-    /// 里面的子控件就会去贴那张合成好的图，而不是光秃秃的窗口背景。
+    /// 里面的子控件就会去贴那张合成好的图。
     /// </summary>
     internal interface IBackdropHost
     {
@@ -213,14 +263,41 @@ internal static class Theme
     }
 
     /// <summary>
-    /// 把整窗背景按控件自己的位置贴进来，代替 <c>g.Clear(Bg)</c>。
-    /// 每个控件贴的是同一张图的对应那一块，所以拼在一起看不出接缝，
-    /// 而且贴完就是不透明的表面，GDI 的文字（<c>TextRenderer</c> 不认 alpha）画上去才清楚。
+    /// 把整窗背景按控件自己的位置贴进来，代替 <c>g.Clear(Bg)</c>。每个控件贴的是同一张图的
+    /// 对应那一块，所以拼在一起看不出接缝，贴完也是不透明的表面，GDI 文字画上去才清楚。
     /// </summary>
     public static void PaintBackdrop(Graphics g, Control c)
     {
         g.Clear(Bg);
-        int ox = 0, oy = 0;
+        Bitmap bmp = HostBackdrop(c, out int ox, out int oy);
+        g.DrawImageUnscaled(bmp, -ox, -oy);
+    }
+
+    /// <summary>
+    /// 取控件中心那一点背景色。<c>TextRenderer</c> 不认 alpha，文字要淡出只能朝底下这个颜色混。
+    /// </summary>
+    public static Color BackdropAt(Control c)
+    {
+        // 摘下来的控件（设置里切页收走的那些）没有底图可贴，也不该为它单开一张
+        if (c.Parent is null && c is not IBackdropHost) return Bg;
+        try
+        {
+            Bitmap bmp = HostBackdrop(c, out int ox, out int oy);
+            int x = Math.Clamp(ox + c.Width / 2, 0, bmp.Width - 1);
+            int y = Math.Clamp(oy + c.Height / 2, 0, bmp.Height - 1);
+            return bmp.GetPixel(x, y);
+        }
+        catch
+        {
+            return Bg;
+        }
+    }
+
+    /// <summary>找到控件所在窗口那张底图，同时算出控件在图里的偏移。</summary>
+    private static Bitmap HostBackdrop(Control c, out int ox, out int oy)
+    {
+        ox = 0;
+        oy = 0;
         Control top = c;
         while (top.Parent is not null)
         {
@@ -229,8 +306,7 @@ internal static class Theme
             top = top.Parent;
         }
 
-        Bitmap bmp = top is IBackdropHost host ? host.BackdropImage : Backdrop(top.ClientSize);
-        g.DrawImageUnscaled(bmp, -ox, -oy);
+        return top is IBackdropHost host ? host.BackdropImage : Backdrop(top.ClientSize);
     }
 
     /// <summary>
@@ -272,7 +348,24 @@ internal static class Theme
         using (var pen = new Pen(edge, 1f))
             g.DrawPath(pen, path);
 
+        InnerRim(g, r, radius, (1f + 0.6f * lift) * opacity);
         Specular(g, r, radius, (0.55f + 0.45f * lift) * opacity);
+    }
+
+    /// <summary>
+    /// 贴着边往里那道光：上边不画，越往下越亮。玻璃的"厚度"就靠它。
+    /// </summary>
+    private static void InnerRim(Graphics g, RectangleF r, float radius, float amount)
+    {
+        if (r.Height < 9f || r.Width < 9f || amount <= 0.004f) return;
+
+        RectangleF inner = RectangleF.Inflate(r, -1.2f, -1.2f);
+        using GraphicsPath path = RoundedRect(inner, Math.Max(0.7f, radius - 1.2f));
+        using var brush = new LinearGradientBrush(RectangleF.Inflate(inner, 1f, 1f),
+            Color.FromArgb(0, 255, 255, 255), Color.FromArgb(A(34 * amount), 255, 255, 255),
+            LinearGradientMode.Vertical);
+        using var pen = new Pen(brush, 1.1f);
+        g.DrawPath(pen, path);
     }
 
     /// <summary>
@@ -288,28 +381,30 @@ internal static class Theme
                    Color.FromArgb(A((12 + 10 * lift) * opacity), 255, 255, 255), LinearGradientMode.ForwardDiagonal))
         using (var pen = new Pen(edge, 1f))
             g.DrawPath(pen, path);
+        InnerRim(g, r, radius, (0.8f + 0.5f * lift) * opacity);
         Specular(g, r, radius, (0.5f + 0.4f * lift) * opacity);
     }
 
     private static int A(float v) => (int)Math.Clamp(v, 0f, 255f);
 
-    /// <summary>叠几层越来越淡的圆角矩形当投影——GDI+ 没有现成的高斯阴影。</summary>
+    /// <summary>叠几层越来越淡、越来越散的圆角矩形当投影——GDI+ 没有现成的高斯阴影。</summary>
     public static void Shadow(Graphics g, RectangleF r, float radius, float amount = 1f)
     {
-        for (int i = 3; i >= 1; i--)
+        for (int i = 4; i >= 1; i--)
         {
-            RectangleF box = RectangleF.Inflate(r, i * 1.6f, i * 1.6f);
-            box.Y += i * 1.1f;
-            using GraphicsPath p = RoundedRect(box, radius + i * 1.6f);
-            using var b = new SolidBrush(Color.FromArgb(A(12 * amount), 0, 0, 0));
+            RectangleF box = RectangleF.Inflate(r, i * 1.5f, i * 1.5f);
+            box.Y += i * 1.0f;
+            using GraphicsPath p = RoundedRect(box, radius + i * 1.5f);
+            // 外圈更淡：几层叠起来像一团化开的影子，而不是四道台阶
+            using var b = new SolidBrush(Color.FromArgb(A(14f * amount / i), 0, 0, 0));
             g.FillPath(b, p);
         }
     }
 
-    /// <summary>顶边那道细反光：中间偏左最亮，两头化开，玻璃的"边缘感"全靠它。</summary>
+    /// <summary>顶边那道细反光：中间偏左最亮，两头化开。</summary>
     private static void Specular(Graphics g, RectangleF r, float radius, float amount)
     {
-        float inset = Math.Max(2f, radius * 0.6f);
+        float inset = Math.Max(2f, radius * 0.85f);
         var line = new RectangleF(r.X + inset, r.Y + 1.1f, r.Width - inset * 2f, 1.1f);
         if (line.Width < 6f) return;
 
@@ -331,13 +426,14 @@ internal static class Theme
 
     /// <summary>
     /// 输入框那种"实心磨砂"：里面嵌着真 TextBox，透不出背景，只能整块实色，
-    /// 但边和顶上那道反光照玻璃的画法来，摆在玻璃面板旁边不打眼。
+    /// 但边和顶上那道反光照玻璃的画法来。
     /// </summary>
     public static void FrostField(Graphics g, RectangleF r, float radius, Color fill, Color line)
     {
         using GraphicsPath path = RoundedRect(r, radius);
         using (var b = new SolidBrush(fill)) g.FillPath(b, path);
         using (var pen = new Pen(line)) g.DrawPath(pen, path);
+        InnerRim(g, r, radius, 0.5f);
         Specular(g, r, radius, 0.42f);
     }
 

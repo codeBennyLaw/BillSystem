@@ -66,10 +66,7 @@ internal sealed class UiButton : Control
     protected override void OnMouseDown(MouseEventArgs e) { base.OnMouseDown(e); Focus(); _downA.To(1); }
     protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); _downA.To(0); }
 
-    /// <summary>
-    /// 得到焦点。点出来的焦点不画环——只有 Tab 走过来的时候才画，
-    /// 判断办法是看这一刻鼠标键是不是按着的。
-    /// </summary>
+    /// <summary>点出来的焦点不画环，只有 Tab 走过来才画——看这一刻鼠标键是不是按着的就知道。</summary>
     protected override void OnGotFocus(EventArgs e)
     {
         base.OnGotFocus(e);
@@ -167,7 +164,7 @@ internal sealed class UiButton : Control
             fore = !Enabled ? Theme.TextDim : Theme.Mix(Theme.TextSub, Theme.Text, hv);
         }
 
-        // Tab 走到这颗按钮上：里面描一圈亮环。往里缩 2 像素，跟外面那圈边框分得开
+        // 焦点环画在里面，往里缩 2 像素，跟外面那圈边框分得开
         float fv = (float)_focusA.Value;
         if (fv > 0.01f)
         {

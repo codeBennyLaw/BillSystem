@@ -24,14 +24,13 @@ public sealed class Bucket
     /// <summary>这一格充了多少钱（元）。0 就是这一格没充值。</summary>
     public double RechargeYuan { get; set; }
 
-    /// <summary>这一格充进来多少度（金额按电价换算）。绿柱子画的就是这一截。</summary>
+    /// <summary>这一格充进来多少度（金额按电价换算）。</summary>
     public double RechargeKwh { get; set; }
 
-    /// <summary>这一格有充值：剩余电量往上跳的那一格，柱子要换个颜色。</summary>
     public bool Recharged => RechargeYuan > 0;
 
     /// <summary>
-    /// 只盖到这一格的一部分：要么这一格还没走完（最右边那格），要么最后一次抄表落在格子中间。
+    /// 只盖到这一格的一部分：要么这一格还没走完，要么最后一次抄表落在格子中间。
     /// 用电量天然比整格矮一截，图上得标出来，不然看着像"用电突然掉下去了"。
     /// </summary>
     public bool Partial => Covered && CoveredSeconds < (End - Start).TotalSeconds - 1;
@@ -61,14 +60,11 @@ public sealed class Summary
 
     /// <summary>
     /// 用电量算不算得出来。增量要两条读数相减才有，只有一条时是"不知道"，
-    /// 不是 0——卡片上那一格该写"--"而不是"0.00"。
+    /// 不是 0——卡片上该写"--"而不是"0.00"。
     /// </summary>
     public bool UsageKnown => Points >= 2;
 
-    /// <summary>
-    /// "还能用多久"拆成数字和单位两截：不到一天说小时，超过两个月说月，算不出来是 null。
-    /// 卡片那种"大数字 + 小单位"的排版直接用这两截。
-    /// </summary>
+    /// <summary>"还能用多久"拆成数字和单位两截：不到一天说小时，超过两个月说月。</summary>
     public (string Value, string Unit)? DaysLeftParts => DaysLeft switch
     {
         null => null,
@@ -82,8 +78,7 @@ public sealed class Summary
 
     /// <summary>
     /// 照眼下的日均，剩下的电不到 <paramref name="days"/> 天就用完了。度数还在阈值以上也算紧急：
-    /// 电扇空调一开日均能翻几倍，等跌到阈值可能已经半夜断电了。
-    /// 天数 ≤ 0（设置里调到 0）就是不看这一条；历史太短算不出日均时同样不算紧急。
+    /// 电扇空调一开日均能翻几倍，等跌到阈值可能已经半夜断电了。天数 ≤ 0 就是不看这一条。
     /// </summary>
     public bool RunsOutWithin(double days) => days > 0 && DaysLeft is { } d && d < days;
 }
@@ -92,14 +87,12 @@ public sealed class Summary
 /// 把"累计用电量"的整点快照换算成各时间粒度的用电量。
 ///
 /// 关键一点：<b>用电量摊在两次抄表之间，不是两个整点之间</b>。学校的电表两三个小时才上传
-/// 一次读数（<see cref="Reading.MeterTime"/>），程序却是每个整点查一次——中间那几次查到的
-/// 累计值跟上次一模一样。要是直接拿相邻整点相减，就会变成"这个钟用了 2 度、下个钟 0 度"
-/// 的锯齿。所以这里先按抄表时间把重复的读数收拢掉（<c>Samples</c>），再把两次抄表之间的
-/// 增量按时间长度<b>按比例摊到</b>它跨过的每一格：小时曲线代表的是"这段时间的平均功率"，
-/// 日/月/年的合计则完全准确。
+/// 一次读数（<see cref="Reading.MeterTime"/>），程序却是每个整点查一次，中间几次查到的累计值
+/// 一模一样。直接拿相邻整点相减就会变成"这个钟 2 度、下个钟 0 度"的锯齿。所以先按抄表时间
+/// 把重复的读数收拢掉（<c>Samples</c>），再把两次抄表之间的增量按时间长度<b>按比例摊到</b>
+/// 它跨过的每一格：小时曲线代表"这段时间的平均功率"，日/月/年的合计完全准确。
 ///
-/// 程序没开着漏掉几个整点是同一回事，一样按比例摊。最后一次抄表之后的那几格还没有数据，
-/// 标成未覆盖（画成空白），只盖到半格的那一格标成 <see cref="Bucket.Partial"/>。
+/// 最后一次抄表之后的那几格标成未覆盖（画成空白），只盖到半格的标成 <see cref="Bucket.Partial"/>。
 /// </summary>
 public static class UsageAggregator
 {
@@ -158,10 +151,8 @@ public static class UsageAggregator
     private readonly record struct Sample(DateTime At, double Used, double Remaining);
 
     /// <summary>
-    /// 把整点读数收拢成"一次抄表一条"，时刻严格递增。
-    ///
-    /// 电表两三个小时才上传一次，中间几个整点查到的是同一次抄表的数——抄表时间没往前走的
-    /// 都并到前一条上（值取后写的那条，可能被修正过）。这样相邻两条之间必定是真的用掉了电。
+    /// 把整点读数收拢成"一次抄表一条"，时刻严格递增。抄表时间没往前走的都并到前一条上
+    /// （值取后写的那条，可能被修正过），这样相邻两条之间必定是真的用掉了电。
     /// </summary>
     private static List<Sample> Samples(List<Reading> readings)
     {
@@ -180,8 +171,8 @@ public static class UsageAggregator
     }
 
     /// <summary>
-    /// 这条读数挂在哪个时刻上：用抄表时间。老数据没有这个字段、或者它跟采集时间差出好几天
-    /// （字段没解析对）时退回整点，至少不会把整段历史挤到一起。
+    /// 这条读数挂在哪个时刻上：用抄表时间。老数据没这个字段、或它跟采集时间差出好几天
+    /// （没解析对）时退回整点，至少不会把整段历史挤到一起。
     /// </summary>
     private static DateTime AtOf(Reading r)
     {
@@ -228,10 +219,9 @@ public static class UsageAggregator
             }
         }
 
-        // 只有一次抄表（或区间里只落进一次）时，上面那个成对相减的循环一次都跑不到，
-        // 图表会整个空白。这时读数落在哪个区间，那个区间就算"有数据"（用电量还是 0，
-        // 因为确实算不出来）。已经有覆盖了就不能再补：否则最后一次抄表所在的那个区间
-        // 会凭空多出一个 0，小时曲线右端直接掉到底。
+        // 只有一次抄表（或区间里只落进一次）时上面那个成对相减的循环一次都跑不到，图表会整个
+        // 空白，所以读数落在哪个区间就算哪个区间"有数据"。已经有覆盖了就不能再补：否则最后
+        // 一次抄表所在的区间会凭空多出一个 0，小时曲线右端直接掉到底。
         if (!buckets.Any(b => b.Covered))
         {
             foreach (Sample sm in new[] { samples[0], samples[^1] })
@@ -258,10 +248,7 @@ public static class UsageAggregator
 
     /// <summary>
     /// 充值标在"剩余电量涨上去的那一格"上：钱是这个钟付的，但电表两三个小时才抄一次，
-    /// 柱子跳上去往往是后一格的事。实在找不到涨上去的那一格
-    /// （同一格里充的电又用掉了）就标在付款那一格。
-    ///
-    /// 月和年粒度直接标付款那一格：电表那两三个小时的延迟在这个尺度上根本看不见，
+    /// 柱子跳上去往往是后一格的事。月和年粒度直接标付款那一格——那点延迟在这个尺度上看不见，
     /// 往后找反倒会把月底那几笔挪到下个月去。
     /// </summary>
     private static void MarkRecharges(
@@ -284,10 +271,8 @@ public static class UsageAggregator
     }
 
     /// <summary>
-    /// 从付款那一格往后找剩余电量跳上去的那一格，最多找 4 格。
-    ///
-    /// 知道这一笔<b>该充进来多少度</b>（金额 ÷ 电价），就挑涨幅离它最近的那一格——光看
-    /// "涨了没有"会被半路的小波动骗走（电表修正过读数，或者同一段里还有第二笔充值）。
+    /// 从付款那一格往后找剩余电量跳上去的那一格，最多找 4 格。知道这一笔<b>该充进来多少度</b>
+    /// （金额 ÷ 电价），就挑涨幅离它最近的那一格——光看"涨了没有"会被半路的小波动骗走。
     /// 涨幅不要求够数：同一格里用掉的电会先吃掉一部分。都没涨就标在付款那一格。
     /// </summary>
     private static int JumpBucket(List<Bucket> buckets, int pay, double kwh)
@@ -346,8 +331,8 @@ public static class UsageAggregator
         List<Sample> samples = Samples(readings);
         DateTime today = now.Date;
 
-        // 日均只按"抄到数的那一段"算。抄表落后本机时间两三个钟，把还没抄到的那几个小时
-        // 也算进分母的话，日均会一直被压低，"还能用多久"跟着虚高。
+        // 日均只按"抄到数的那一段"算：把还没抄到的那几个小时也算进分母，日均会一直被压低，
+        // "还能用多久"跟着虚高
         DateTime firstAt = samples[0].At;
         DateTime knownTo = samples.Count > 1 ? samples[^1].At : now;
         if (knownTo > now) knownTo = now;

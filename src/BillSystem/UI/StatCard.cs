@@ -33,7 +33,7 @@ internal sealed class StatCard : Control
 
     /// <summary>
     /// 从下往上淡入一次。<paramref name="delayMs"/> 让同一排的卡片依次错开，
-    /// 看着像"铺开"而不是"一起蹦出来"。窗口第一次露脸时叫一次就够。
+    /// 看着像"铺开"而不是"一起蹦出来"。
     /// </summary>
     public void Reveal(int delayMs)
     {
@@ -41,8 +41,22 @@ internal sealed class StatCard : Control
         _enterA.To(1, delayMs);
     }
 
-    protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); _hoverA.To(1); }
-    protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); _hoverA.To(0); }
+    /// <summary>鼠标进 / 出。主窗口靠它决定要不要贴那张"折成多少钱"的小窗。</summary>
+    public event Action<StatCard, bool>? Hovered;
+
+    protected override void OnMouseEnter(EventArgs e)
+    {
+        base.OnMouseEnter(e);
+        _hoverA.To(1);
+        Hovered?.Invoke(this, true);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        base.OnMouseLeave(e);
+        _hoverA.To(0);
+        Hovered?.Invoke(this, false);
+    }
 
     public string Title { get => _title; set { _title = value; SyncAccessible(); Invalidate(); } }
     public string Unit { get => _unit; set { _unit = value; SyncAccessible(); Invalidate(); } }
@@ -131,11 +145,10 @@ internal sealed class StatCard : Control
         if (en <= 0.004f) return;                // 一点没进来就只剩背景，别留个影子
         float hv = (float)_hoverA.Value;
 
-        // 玻璃自己按 en 淡入；文字画不了半透明（TextRenderer 不认 alpha），
-        // 只能往背景色里兑——入场那半程玻璃还很薄，兑背景色跟实际看到的几乎一样
+        // 文字画不了半透明（TextRenderer 不认 alpha），只能往背景色里兑
         Color Fade(Color c) => Theme.Mix(Theme.Bg, c, en);
 
-        // 入场从下面浮上来；鼠标停上去再抬 2 像素，像被托起来一点
+        // 入场从下面浮上来；鼠标停上去再抬 2 像素
         int dy = (int)Math.Round((1f - en) * 12f - hv * 2f);
         Color value = Fade(Painted);
 
@@ -144,7 +157,7 @@ internal sealed class StatCard : Control
         Theme.Glass(g, box, 16f, 0.12f + 0.88f * hv, 1f, true,
             hv > 0.01f ? Painted : null, en);
 
-        // 左上角一个小色点，跟数字同色，扫一眼就知道哪张卡在报警；悬停时点外面透出一圈光
+        // 左上角一个小色点，跟数字同色，扫一眼就知道哪张卡在报警
         if (hv > 0.01f)
             using (var halo = new SolidBrush(Color.FromArgb((int)(56 * hv * en), Painted)))
                 g.FillEllipse(halo, 12f, 12f + dy, 15f, 15f);

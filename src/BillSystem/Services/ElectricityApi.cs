@@ -108,7 +108,6 @@ public sealed class ElectricityApi : IDisposable
         var now = DateTime.Now;
         return new Reading
         {
-            // 这条读数算在哪个整点上：整点轮询查到的就落在这个整点的格子里
             SlotTime = Reading.SlotOf(now),
             MeterTime = meterTime,
             FetchedAt = now,

@@ -20,6 +20,12 @@ internal sealed class MainForm : Form, IMessageFilter
     private readonly UiButton _btnSettings = new("设置");
     private readonly Segment _segG = new();
 
+    /// <summary>鼠标停在卡片上时贴出来的那张"折成多少钱"。</summary>
+    private readonly CardTip _tip = new();
+
+    /// <summary>每张卡片对应小窗里写什么。没得算（比如只有一条读数）的那张就不摆。</summary>
+    private readonly Dictionary<StatCard, (string Title, List<CardTip.Row> Rows)> _tips = new();
+
     /// <summary>宿舍切换器。只记录一间时不摆（没什么可切的），那时候写一行房间名。</summary>
     private readonly Segment _segDorm = new() { AccessibleName = "宿舍" };
 
@@ -38,8 +44,8 @@ internal sealed class MainForm : Form, IMessageFilter
     private PollStatus _status0 = new();
 
     /// <summary>
-    /// 只为了把"已更新 · 刚刚"这句话写对。查询是半小时一次的，中间这句话会越来越不准，
-    /// 所以窗口开着的时候每半分钟自己改一次；窗口收起来就停，不白转。
+    /// 只为了把"已更新 · 刚刚"这句话写对：查询是半小时一次的，中间这句话会越来越不准。
+    /// 窗口收起来就停，不白转。
     /// </summary>
     private readonly System.Windows.Forms.Timer _ageTick = new() { Interval = 30_000 };
 
@@ -73,6 +79,8 @@ internal sealed class MainForm : Form, IMessageFilter
         VisibleChanged += (_, _) =>
         {
             _ageTick.Enabled = Visible;
+            // 收窗口时鼠标正停在卡片上的话不会有 MouseLeave，小窗得自己收，不然下次打开还挂着
+            _tip.HideTip();
             if (!Visible) return;
             ApplyStatusText();
             RevealCards();
@@ -80,8 +88,7 @@ internal sealed class MainForm : Form, IMessageFilter
     }
 
     /// <summary>
-    /// 窗口每次露脸时让五张卡片依次浮上来。托盘里点开就是"进来一次"，
-    /// 这一下比一堆数字凭空出现要软；隐藏着的时候动画会自己跳到终值，不白转。
+    /// 窗口每次露脸时让五张卡片依次浮上来。隐藏着的时候动画会自己跳到终值，不白转。
     /// </summary>
     private void RevealCards()
     {
@@ -90,7 +97,6 @@ internal sealed class MainForm : Form, IMessageFilter
     }
 
     /// <summary>
-    /// Tab 顺序：宿舍切换器（有两间以上才在）、右上角那两颗（充值、设置），再是粒度那一条。
     /// 卡片和图表不进 Tab 环——它们没有可操作的东西，Tab 停在上面只是让人多按两下。
     /// </summary>
     private void TabOrder()
@@ -147,15 +153,44 @@ internal sealed class MainForm : Form, IMessageFilter
         foreach (UiButton b in new[] { _btnSettings, _btnRecharge })
             Controls.Add(b);
 
-        foreach (StatCard c in Cards) Controls.Add(c);
+        foreach (StatCard c in Cards)
+        {
+            c.Hovered += CardHovered;
+            Controls.Add(c);
+        }
 
         _chart.Granularity = _cfg.Granularity;
         Controls.Add(_chart);
 
-        Resize += (_, _) => { Layout1(); Invalidate(true); };
+        Controls.Add(_tip);
+
+        Resize += (_, _) => { _tip.HideTip(); Layout1(); Invalidate(true); };
     }
 
-    private StatCard[] Cards => new[] { _cardRemain, _cardToday, _cardMonth, _cardAvg, _cardLeft };
+    /// <summary>卡片上那几个度数折成钱：算得出来才贴小窗，贴的时候顺手把它挪到卡片底下。</summary>
+    private void CardHovered(StatCard card, bool on)
+    {
+        if (!on) { _tip.HideTip(); return; }
+        if (!_tips.TryGetValue(card, out (string Title, List<CardTip.Row> Rows) t)) { _tip.HideTip(); return; }
+        _tip.ShowFor(card, t.Title, t.Rows);
+    }
+
+    private static string Money(double kwh) => $"{AppConfig.YuanOf(kwh):0.00} 元";
+
+    /// <summary>
+    /// 出图用：把某张卡片的"折成多少钱"小窗贴出来（没法在离屏渲染里真去悬停）。
+    /// 返回小窗本身——<see cref="Control.DrawToBitmap"/> 不认 z 序，出图那边得让它最后再画一遍。
+    /// </summary>
+    internal Control DevShowTip(int card)
+    {
+        CardHovered(Cards[Math.Clamp(card, 0, Cards.Length - 1)], true);
+        return _tip;
+    }
+
+    /// <summary>五张卡片，顺序就是界面上从左到右。拖窗口时每一帧都要遍历它，别每次都新开一个数组。</summary>
+    private StatCard[] Cards => _cards ??= new[] { _cardRemain, _cardToday, _cardMonth, _cardAvg, _cardLeft };
+
+    private StatCard[]? _cards;
 
     /// <summary>拖窗口改大小时整块一起画完再上屏，不然卡片和图表会各自闪一下。</summary>
     protected override CreateParams CreateParams
@@ -171,8 +206,7 @@ internal sealed class MainForm : Form, IMessageFilter
     private const int Pad = 20;
 
     /// <summary>
-    /// 窗口自己也要铺那张柔光底图：子控件贴的就是这张图对应的那一块，
-    /// 窗口只填一个实色的话，卡片周围会露出一圈明显的接缝。
+    /// 窗口自己也要铺那张柔光底图：只填实色的话，卡片周围会露出一圈明显的接缝。
     /// </summary>
     protected override void OnPaintBackground(PaintEventArgs e)
         => e.Graphics.DrawImageUnscaled(Theme.Backdrop(ClientSize), 0, 0);
@@ -191,7 +225,7 @@ internal sealed class MainForm : Form, IMessageFilter
         // 标题底下这一行：两间以上摆切换器，只有一间（或一间都没有）就写一行字
         if (_manyDorms)
         {
-            // 这一行跟右上那两个按钮同高，间数多了得掐住宽度，别顶到按钮上
+            // 间数多了得掐住宽度，别顶到按钮上
             _segDorm.FitWidth(76);
             _segDorm.SetBounds(Pad, 42, Math.Min(_segDorm.Width, Math.Max(80, _btnSettings.Left - 12 - Pad)), 32);
         }
@@ -247,8 +281,8 @@ internal sealed class MainForm : Form, IMessageFilter
     /// <summary>宿舍名单变了（加了、删了、刚启动）就整条重摆切换器。</summary>
     public void SetDorms(IReadOnlyList<DormSession> sessions, DormSession? current)
     {
-        _segDorm.Clear();
-        foreach (DormSession s in sessions) _segDorm.Add(s.Dorm.Short, s);
+        // 名单没变就一格都不动：每保存一次设置都重排的话，滑块会先弹回第一格再滑回来
+        _segDorm.SetItems(sessions.Select(s => (s.Dorm.Short, (object)s)), current);
 
         bool many = sessions.Count > 1;
         _manyDorms = many;
@@ -260,6 +294,7 @@ internal sealed class MainForm : Form, IMessageFilter
     /// <summary>换到某一间。一间都没加时传 null，界面照样立得住，只是没有数。</summary>
     public void Bind(DormSession? s)
     {
+        bool switched = !ReferenceEquals(s, _cur);
         _cur = s;
         if (s is not null) _segDorm.Select(s);
 
@@ -267,10 +302,14 @@ internal sealed class MainForm : Form, IMessageFilter
         _btnRecharge.Enabled = s is not null;
         _room.Text = s?.Dorm.Label ?? "还没有添加宿舍：到设置里加一间";
 
+        _tip.HideTip();
         Layout1();
         _chart.ScrollToEnd();
         ApplyStatusText();
         RefreshData();
+
+        // 换了一间就当重新进来一次：卡片再铺一遍，图表也跟着重新长（换粒度是同一套动效）
+        if (switched) RevealCards();
         Invalidate(true);
     }
 
@@ -300,6 +339,7 @@ internal sealed class MainForm : Form, IMessageFilter
 
         _chart.Granularity = g;
         _chart.Span = span;
+        _chart.SeriesKey = $"{_cur?.Dorm.Key}|{g}";
         _chart.EmptyText = _cur is null ? "还没有添加宿舍"
             : all.Count == 0 ? "还没有历史数据"
             : "这段时间没有数据";
@@ -320,28 +360,30 @@ internal sealed class MainForm : Form, IMessageFilter
     private void ApplyStatusText()
     {
         PollStatus st = _status0;
-        _status.Text = st.Busy ? "正在查询…"
-            : st.Error is not null ? $"更新失败：{Clip(st.Error, 34)}"
-            : st.LastSuccess is { } t ? $"已更新 · {HumanAge(t)}"
-            : "等待首次查询";
-        _status.ForeColor = st.Error is not null ? Theme.Bad
-            : st.Busy ? Theme.Accent
-            : Theme.TextSub;
+        _status.Say(
+            st.Busy ? "正在查询…"
+                : st.Error is not null ? $"更新失败：{Clip(st.Error, 34)}"
+                : st.LastSuccess is { } t ? $"已更新 · {HumanAge(t)}"
+                : "等待首次查询",
+            st.Error is not null ? Theme.Bad
+                : st.Busy ? Theme.Accent
+                : Theme.TextSub);
     }
 
     private void UpdateCards(Summary s)
     {
         // 只有一条读数时用电量算不出来（要两条相减），那几格写"--"，别摆个 0.00 让人以为没用电
         bool none = !s.UsageKnown;
+        _tips.Clear();
 
         _cardRemain.Title = "剩余电量";
         _cardRemain.Unit = "度";
+        // 查询失败右上角已经写明了，这儿照旧写抄表时间——它说明数据停在哪一刻，
+        // 换成"上次更新失败"反倒把唯一有用的那个时间盖掉
         _cardRemain.Set(
             s.Remaining is { } rem ? rem.ToString("0.00") : "--",
-            _status0.Error is not null ? "上次更新失败"
-                : s.MeterTime is { } mt ? $"抄表 {mt:MM-dd HH:mm}"
-                : "",
-            // 阈值是这一间自己的；一间都没加时也没有剩余度数，配多少都不影响颜色
+            s.MeterTime is { } mt ? $"抄表 {mt:MM-dd HH:mm}" : "",
+            // 阈值是这一间自己的
             Theme.LevelColor(s.Remaining, _cur?.Dorm.LowThreshold ?? 0));
 
         _cardToday.Title = "今日用电";
@@ -359,6 +401,27 @@ internal sealed class MainForm : Form, IMessageFilter
         _cardAvg.Set(s.AvgDaily is { } avg ? avg.ToString("0.00") : "--",
             s.AvgDaily is null ? "" : $"近 {s.AvgSpanDays:0.0} 天",
             Theme.Text);
+
+        // 鼠标停上去就把度数折成钱：卡片上写多少度，小窗里就一行一行对着写多少钱
+        if (!none)
+        {
+            _tips[_cardToday] = ("今日电费", new List<CardTip.Row>
+            {
+                new("今日", Money(s.Today)),
+                new("昨日", Money(s.Yesterday)),
+            });
+
+            var monthRows = new List<CardTip.Row> { new("本月", Money(s.ThisMonth)) };
+            if (s.TotalUsed is { } tu2) monthRows.Add(new CardTip.Row("累计", Money(tu2)));
+            _tips[_cardMonth] = ($"{DateTime.Now.Month} 月电费", monthRows);
+        }
+
+        if (s.AvgDaily is { } avg2)
+            _tips[_cardAvg] = ("日均电费", new List<CardTip.Row>
+            {
+                new("每天", Money(avg2)),
+                new($"近 {s.AvgSpanDays:0.0} 天", Money(avg2 * s.AvgSpanDays)),
+            });
 
         _cardLeft.Title = "预计可用";
         // 不到一天就换成小时说：剩 0.4 天不如"9.6 小时"来得有数
@@ -416,6 +479,7 @@ internal sealed class MainForm : Form, IMessageFilter
     {
         _cfg = cfg;
         _segG.Select(cfg.Granularity);
+        _tip.HideTip();
         _chart.ScrollToEnd();
         Layout1();
         RefreshData();

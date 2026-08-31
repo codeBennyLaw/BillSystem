@@ -51,17 +51,15 @@ internal static class SelfTest
         Check("UsageBetween 半区间=3",
             Math.Abs(UsageAggregator.UsageBetween(readings, t0, t0.AddHours(3)) - 3) < 1e-9);
 
-        // 换表/清零：累计读数变小，不能算成负用电
+        // 换表/清零：累计读数变小
         var reset = new List<Reading> { R(t0, 100, 20), R(t0.AddHours(2), 5, 200) };
         Check("换表不产生负数用电",
             UsageAggregator.Build(reset, Granularity.Hour, t0, t0.AddHours(2)).All(b => b.Usage == 0));
 
-        // 区间内没数据的桶不能被当成 0 用电
         List<Bucket> gap = UsageAggregator.Build(readings, Granularity.Day, t0.AddDays(-3), t0.AddHours(30));
         Check("无数据区间标记为未覆盖", gap.Take(3).All(b => !b.Covered));
 
-        // 最后一次抄表之后的那几个小时同样是"还没数据"，不能补成 0，
-        // 否则小时曲线画到右端会直接掉到底
+        // 补成 0 的话小时曲线画到右端会直接掉到底
         List<Bucket> tail = UsageAggregator.Build(readings, Granularity.Hour, t0, t0.AddHours(34));
         Check("最后一次抄表之后未覆盖", tail.Count == 34 && tail.Skip(30).All(b => !b.Covered),
             string.Join(",", tail.Skip(30).Select(b => b.Covered ? "1" : "0")));
@@ -135,9 +133,8 @@ internal static class SelfTest
             string.Join(",", spread.Take(3).Select(b => b.Usage.ToString("0.###"))));
 
         // ---------- 学校两个钟才抄一次表：中间那次整点读数跟上次一模一样 ----------
+        // 直接相减会变成"一个钟 2 度、下一个钟 0 度"的锯齿，增量得摊在两次抄表之间
 
-        // 直接拿相邻整点相减会变成"一个钟 2 度、下一个钟 0 度"的锯齿，
-        // 增量得摊在两次抄表之间
         var lag = new List<Reading>
         {
             Rt(day.AddHours(1), day.AddHours(1), 100, 30),
@@ -215,7 +212,7 @@ internal static class SelfTest
         Check("年粒度也标充值", byYear.Count == 1 && Math.Abs(byYear[0].RechargeKwh - 90) < 1e-9,
             byYear[0].RechargeKwh.ToString("0.#"));
 
-        // 同一格里又用掉一些电：净涨幅只有 81 度，但绿柱子该画满 90 度那一截
+        // 同一格里又用掉一些电：净涨幅只有 81 度，但这一笔该记成 90 度
         var payAndUse = new List<Reading>
         {
             R(day.AddHours(1), 100, 10),
@@ -244,16 +241,9 @@ internal static class SelfTest
         Check("小波动骗不走那一笔充值", late[2].Recharged && !late[1].Recharged,
             string.Join(",", late.Select(b => b.RechargeYuan.ToString("0.#"))));
 
-        // 一个整点只留一条：同一格再来一次是覆盖，不是新增
         CheckStore(Check);
-
-        // 充值记录：文件正序、内存倒序
         CheckRechargeStore(Check);
-
-        // 配置、宿舍名单、按间配的提醒
         CheckConfig(Check);
-
-        // 数据目录里"没在记录名单里"的那些文件
         CheckOrphans(Check);
 
         // 真实返回样本
@@ -277,7 +267,7 @@ internal static class SelfTest
             Check("解析接口返回", false, ex.Message);
         }
 
-        // 充值记录：金额单位是分，方式字段要认得
+        // 金额单位是分
         var rec = new RechargeRecord
         {
             OrderCode = "T1", PayTime = new DateTime(2026, 8, 29, 10, 47, 58),
@@ -286,8 +276,6 @@ internal static class SelfTest
         Check("分转元=20", Math.Abs(rec.Yuan - 20) < 1e-9, rec.Yuan.ToString("0.##"));
         Check("扫码充值标签", rec.MethodLabel == "扫码充值", rec.MethodLabel);
         Check("学生卡标签", new RechargeRecord { PayMethod = "card" }.MethodLabel == "学生卡");
-
-        // ---------- 提醒邮件的内容 ----------
 
         CheckMail(Check, UsageAggregator.Summarize(readings, t0.AddHours(30)));
 
@@ -367,9 +355,9 @@ internal static class SelfTest
     }
 
     /// <summary>
-    /// 提醒邮件的内容：标题要先说触发的那件事，两份正文（纯文本 / HTML）都得带上关键数字，
-    /// 末尾要写清眼下的提醒条件。发件人显示名必须是<b>触发那一间</b>的房号（几间共用一个发件箱，
-    /// 收件人靠这行分得清是谁的电快没了）。只查生成出来的文字，不真的发信。
+    /// 提醒邮件的内容：两份正文（纯文本 / HTML）都得带上关键数字，末尾写清眼下的提醒条件。
+    /// 发件人显示名必须是<b>触发那一间</b>的房号——几间共用一个发件箱，收件人靠这行分得清是谁。
+    /// 只查生成出来的文字，不真的发信。
     /// </summary>
     private static void CheckMail(Action<string, bool, string> check, Summary s)
     {
@@ -413,7 +401,7 @@ internal static class SelfTest
             && t2.Subject == low.Subject && t2.FromName == low.FromName,
             $"{MailAlert.TestLetter(cfg, dorm, s).Subject} / {MailAlert.TestLetter(cfg, dorm, s).FromName}");
 
-        // 另一间的信写的是另一间的房号、收件人和阈值，两间互不相干
+        // 两间互不相干
         var other = new Dorm(12, 108) { LowThreshold = 20, MailTo = { "other@qq.com" } };
         MailAlert.Letter otherLow = MailAlert.LowLetter(other, r, s, true);
         check("换一间就换发件人", otherLow.FromName == "12栋108", otherLow.FromName);
@@ -435,8 +423,7 @@ internal static class SelfTest
     }
 
     /// <summary>
-    /// 配置和宿舍名单：房号认得回来、加重了要去掉、当前那间没了要落回第一间，
-    /// 提醒（阈值、开关、收件人）是一间一套，
+    /// 配置和宿舍名单：房号认得回来、加重了要去掉、当前那间没了要落回第一间，提醒是一间一套，
     /// 还有设置窗口拿的那份副本必须是真副本（改副本不能动到正在跑的配置）。
     /// </summary>
     private static void CheckConfig(Action<string, bool, string> check)
@@ -506,6 +493,18 @@ internal static class SelfTest
         check("抄回来之后两份还是分开的", cfg.Dorms[0].MailTo.Count == 2,
             cfg.Dorms[0].MailTo.Count.ToString());
 
+        // 主界面随手存下来的那些（粒度、充值窗口位置）不该被设置窗口那份旧副本盖回去。
+        // 另起一对，别动上面那两份——下面还要接着拿 cfg 验"在跑的那间怎么跟上新设置"
+        var mine = new AppConfig { Granularity = Granularity.Hour, RechargeX = 120, RechargeY = 80 };
+        AppConfig stale = mine.Clone();
+        stale.Granularity = Granularity.Year;
+        stale.RechargeX = int.MinValue;
+        stale.RechargeY = int.MinValue;
+        mine.CopyFrom(stale);
+        check("保存设置不会盖掉主界面选的粒度", mine.Granularity == Granularity.Hour, mine.Granularity.ToString());
+        check("保存设置不会盖掉充值窗口记下的位置",
+            mine.HasRechargePos && mine.RechargeX == 120 && mine.RechargeY == 80, mine.RechargeX.ToString());
+
         // 已经在跑的那间靠这个跟上新设置，不重建、不重读 jsonl
         var running = new Dorm(43, 422);
         running.CopyAlertsFrom(cfg.Dorms[0]);
@@ -562,6 +561,7 @@ internal static class SelfTest
         }
     }
 
+    /// <summary>
     /// 落到文件里得是正序（最早的在第一行）。老文件是倒序的，载入时应该自己理顺。
     /// 用一对假房号，跑完删文件。
     /// </summary>
@@ -591,7 +591,7 @@ internal static class SelfTest
             check("补完文件第一行换成那笔更早的", FirstOrder(path) == "Z", FirstOrder(path));
             check("补完文件最后一行还是最新那笔", LastOrder(path) == "C", LastOrder(path));
 
-            // 老版本留下的倒序文件：载入时理成正序
+            // 老版本留下的倒序文件
             File.WriteAllText(path, string.Join(Environment.NewLine, new[]
             {
                 Line("C", late), Line("B", mid), Line("A", early), Line("B", mid),

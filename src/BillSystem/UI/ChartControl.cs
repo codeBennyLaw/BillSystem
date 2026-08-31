@@ -6,7 +6,7 @@ namespace BillSystem.UI;
 
 /// <summary>
 /// 用 GDI+ 自己画的图表：用电量拟合成一条平滑曲线，剩余电量画柱子（用右边那根纵轴），
-/// 充过值的那一格柱子换成绿色。整段历史就是一张表，滚轮（或按住左键拖）左右滑动，不分页。
+/// 充过值的那一格在柱顶点一个小三角。整段历史就是一张表，滚轮（或按住左键拖）左右滑动，不分页。
 /// 纵轴按整段历史定标，所以滑动过程中高度不会忽然改变比例。
 /// </summary>
 internal sealed class ChartControl : Control
@@ -28,7 +28,8 @@ internal sealed class ChartControl : Control
     {
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
                  | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
-        _scrollA = new Anim(this, 0, 180);
+        // 滑动过程中十字线要跟着落到新的一格上，所以每一帧都对一次鼠标底下是哪个桶
+        _scrollA = new Anim(this, 0, 180, _ => SyncHover());
         _growA = new Anim(this, 1, 520);
         BackColor = Theme.Bg;
         Font = Theme.FontSmall;
@@ -44,6 +45,14 @@ internal sealed class ChartControl : Control
 
     public Granularity Granularity { get; set; } = Granularity.Day;
     public string EmptyText { get; set; } = "暂无数据";
+
+    /// <summary>
+    /// 这一段数据是谁的（哪间宿舍、哪个粒度）。换宿舍也要跟换粒度一样整张表重新长一遍，
+    /// 光比第一格的时间认不出来：两间宿舍的历史很可能从同一天起头。
+    /// </summary>
+    public string SeriesKey { get; set; } = "";
+
+    private string _shownKey = "";
 
     /// <summary>一屏显示多少个区间。数据比这个少就整段铺开。</summary>
     public int Span
@@ -66,18 +75,23 @@ internal sealed class ChartControl : Control
             _data = value ?? new List<Bucket>();
             _hover = -1;
 
+            bool switched = SeriesKey != _shownKey;   // 换了宿舍或粒度
+            _shownKey = SeriesKey;
+
             // 同一段历史只是末尾多了几格（每个整点来一条新读数就是这样）：贴着最右边看的时候
             // 让它滑过去，不要"跳"一下。换粒度、重开窗口那种整段换掉的还是直接就位。
-            bool grew = _pinned
+            bool grew = !switched
+                        && _pinned
                         && old.Count > 0
                         && _data.Count > old.Count
                         && _data.Count - old.Count <= 4
                         && _data[0].Start == old[0].Start;
             ClampScroll(!grew);
 
-            // 换粒度、第一次拿到数据才让它重新长一遍；每小时多出一格可不能整张表重来
-            bool sameSeries = old.Count > 0 && _data.Count >= old.Count
-                                            && _data.Count > 0 && _data[0].Start == old[0].Start;
+            // 换宿舍、换粒度、第一次拿到数据才让它重新长一遍；每小时多出一格可不能整张表重来
+            bool sameSeries = !switched
+                              && old.Count > 0 && _data.Count >= old.Count
+                              && _data[0].Start == old[0].Start;
             if (!sameSeries && _data.Count > 0)
             {
                 _growA.Set(0);
@@ -176,6 +190,24 @@ internal sealed class ChartControl : Control
         if (_hover != -1) { _hover = -1; Invalidate(); }
     }
 
+    /// <summary>图表滑走了、鼠标还停在原地：十字线和气泡得跟着落到新的桶上。</summary>
+    private void SyncHover()
+    {
+        if (_dragging || !IsHandleCreated || !Visible) return;
+        Point p = PointToClient(Cursor.Position);
+        int idx = ClientRectangle.Contains(p) ? HitTest(p.X) : -1;
+        if (idx != _hover) { _hover = idx; Invalidate(); }
+    }
+
+    /// <summary>窗口收进托盘时不会有 WM_MOUSELEAVE，得自己把悬停状态清掉。</summary>
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        base.OnVisibleChanged(e);
+        if (Visible) return;
+        _pressing = _dragging = false;
+        _hover = -1;
+    }
+
     private const int PadTop = 34;
     private const int PadBottom = 44;
     private const int PadLeftBase = 58;
@@ -220,8 +252,7 @@ internal sealed class ChartControl : Control
         // 跟上面几张卡片一样的一块玻璃，图表就不像是直接飘在背景上
         Theme.Glass(g, Theme.Inner(this), 18f, 0.08f);
 
-        // 只有一条抄表记录时用电量算不出来（要两条才能相减），但剩余电量是实打实的，
-        // 所以有剩余电量就照样画，别整块空白
+        // 只有一条抄表记录时用电量算不出来（要两条才能相减），但剩余电量是实打实的，照样画
         bool anyUsage = _data.Any(b => b.Covered);
         bool anyRemain = _data.Any(b => b.Remaining is not null);
         if (_data.Count == 0 || (!anyUsage && !anyRemain))
@@ -238,8 +269,7 @@ internal sealed class ChartControl : Control
 
         Rectangle plot = Plot;
 
-        // 纵轴按"整段历史"定标，不是按当前这一屏：滑动时比例不变，才看得出哪天高哪天低。
-        // 一条记录都算不出用电量时（峰值 0）按 1 度画，不然左边一列刻度全是 0.00
+        // 纵轴按"整段历史"定标，不是按当前这一屏：滑动时比例不变，才看得出哪天高哪天低
         double peak = _data.Max(b => b.Usage);
         double yMax = NiceCeil(peak > 0 ? peak : 1);
 
@@ -256,7 +286,6 @@ internal sealed class ChartControl : Control
 
         // 半个身子在外面的柱子/线段裁掉，别画到坐标轴外面去
         g.SetClip(new Rectangle(plot.Left, plot.Top - 8, plot.Width + 1, plot.Height + 9));
-        // 柱子先画，曲线压在上面：曲线是主角（用电量），柱子是背景（剩余电量）
         if (drawRemain) DrawRemainBars(g, plot, rMax, remainCount == 1);
         DrawUsageCurve(g, plot, yMax, !drawRemain, partial);
         g.ResetClip();
@@ -271,8 +300,8 @@ internal sealed class ChartControl : Control
     private const int Ticks = 4;
 
     /// <summary>
-    /// 最后有数据的那一格常常只走了一半（这个小时才过了二十分钟，或者最后一次抄表落在格子中间），
-    /// 用电量天然比前面矮一截。找出来单独画成虚线 + 空心点，不然曲线右端看着像"用电突然掉下去了"。
+    /// 最后有数据的那一格常常只走了一半，用电量天然比前面矮一截。找出来单独画成虚线 + 空心点，
+    /// 不然曲线右端看着像"用电突然掉下去了"。
     /// </summary>
     private int PartialIndex()
     {
@@ -370,12 +399,11 @@ internal sealed class ChartControl : Control
     }
 
     /// <summary>
-    /// 只有小时和日粒度在柱子上标充值。月和年那一格里往往有好几笔，标了也说不清是哪一笔，
-    /// 金额和度数照样写在气泡里。
+    /// 只有小时和日粒度在柱子上标充值。月和年那一格里往往有好几笔，标了也说不清是哪一笔。
     /// </summary>
     private bool MarksRecharge => Granularity is Granularity.Hour or Granularity.Day;
 
-    /// <summary>眼下这一屏里有没有标出来的充值：没有就不摆"充值"那条图例，免得指着个不存在的东西。</summary>
+    /// <summary>眼下这一屏里有没有标出来的充值：没有就不摆"充值"那条图例。</summary>
     private bool VisibleRecharged()
     {
         if (!MarksRecharge) return false;
@@ -400,7 +428,7 @@ internal sealed class ChartControl : Control
 
     /// <summary>
     /// 充值那一格的标记：柱子顶上一个朝上的小三角。<b>柱子本身的颜色一点不动</b>——柱状图只表示
-    /// 剩余电量，这个三角只说"这一格里充过电"，充了多少钱、折多少度看气泡。
+    /// 剩余电量。
     /// </summary>
     private static void DrawRechargeMark(Graphics g, float cx, float cy, bool hot)
     {
@@ -440,11 +468,9 @@ internal sealed class ChartControl : Control
 
     /// <summary>
     /// 把这一段的点连成一条平滑曲线：单调三次 Hermite 插值（Fritsch–Carlson 限幅），
-    /// 换算成贝塞尔段交给 GDI+。两个点之间没得插，直连。
-    ///
-    /// 不用 <c>AddCurve</c> 那种基数样条，是因为它会<b>过冲</b>：两次抄表之间的用电量是平摊的，
-    /// 好几格数值一模一样，样条会在中间鼓一个包；落差大的地方还会甩到 0 以下，看着像用了负电。
-    /// 这个插值保证曲线不超出相邻两点的范围——相等的那几格画出来就是平的。
+    /// 换算成贝塞尔段交给 GDI+。不用 <c>AddCurve</c> 那种基数样条是因为它会<b>过冲</b>：
+    /// 两次抄表之间的用电量是平摊的，好几格数值一模一样，样条会在中间鼓一个包，
+    /// 落差大的地方还会甩到 0 以下。这个插值保证曲线不超出相邻两点的范围。
     /// </summary>
     private static void AddCurve(GraphicsPath path, List<PointF> pts)
     {
@@ -586,13 +612,12 @@ internal sealed class ChartControl : Control
             widest = Math.Max(widest, g.MeasureString(XLabel(_data[i]), Theme.FontSmall).Width);
         int stride = NiceStride((int)Math.Ceiling((widest + 12) / Math.Max(slot, 1f)));
 
-        // 刻度挑在"绝对时间"的整数倍上（每 6 小时、每周一、每季度……），
-        // 这样滑动时标签是跟着内容一起走的，不会每滑一格就重新排一遍
+        // 刻度挑在"绝对时间"的整数倍上（每 6 小时、每周一、每季度……），滑动时标签跟着内容走
         for (int i = a; i <= b; i++)
         {
             if (AxisKey(_data[i]) % stride != 0) continue;
             float cx = XOf(p, i + 0.5);
-            // 只给露在图里的桶画标签：多给的那一个桶还在坐标轴外面，标签会跑到纵轴数字那一列去
+            // 多给的那一个桶还在坐标轴外面，标签会跑到纵轴数字那一列去
             if (cx < p.Left || cx > p.Right) continue;
             bool boundary = Granularity == Granularity.Hour && _data[i].Start.Hour == 0;
             g.DrawString(XLabel(_data[i]), Theme.FontSmall, boundary ? sub : dim,
@@ -653,7 +678,7 @@ internal sealed class ChartControl : Control
             }
             else
             {
-                // 曲线的图例就画成一小段线加个点，跟图里长得一样，不用猜哪个是哪个
+                // 图例里的曲线也画成一小段线加个点，跟图里长得一样
                 using var pen = new Pen(c, 2f);
                 g.DrawLine(pen, x, y + 9, x + 11, y + 9);
                 g.FillEllipse(b, x + 4f, y + 7f, 4f, 4f);
@@ -671,7 +696,7 @@ internal sealed class ChartControl : Control
         }
     }
 
-    /// <summary>底下那条细滚动条：看得出现在停在整段历史的哪儿，也提示"这张表可以滑"。</summary>
+    /// <summary>底下那条细滚动条：看得出现在停在整段历史的哪儿。</summary>
     private void DrawScrollBar(Graphics g, Rectangle p)
     {
         if (MaxScroll <= 0 || _data.Count == 0) return;
@@ -707,7 +732,6 @@ internal sealed class ChartControl : Control
         using (var pen = new Pen(Color.FromArgb(70, Theme.Text), 1) { DashStyle = DashStyle.Dot })
             g.DrawLine(pen, cx, p.Top, cx, p.Bottom);
 
-        // 曲线上那一点套个圈，指到哪儿一目了然
         if (b.Covered)
         {
             float py = p.Bottom - (float)(b.Usage / yMax * p.Height * _growA.Value);
@@ -732,7 +756,7 @@ internal sealed class ChartControl : Control
         if (drawRemain && b.Remaining is { } rem)
             lines.Add(($"剩余  {rem:0.00} 度", Theme.Remain, Theme.FontSmall));
 
-        // 这一格的柱子是绿的，气泡里把金额和折合的度数都写出来
+        // 金额和折合的度数都写出来
         if (b.Recharged)
             lines.Add(($"充值  {b.RechargeYuan:0.##} 元 · {b.RechargeKwh:0.0} 度",
                 Theme.Recharge, Theme.FontSmall));

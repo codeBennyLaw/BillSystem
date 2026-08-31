@@ -17,8 +17,8 @@ internal sealed class Segment : Control
     private int _pressX;
     private float _grabDx;   // 按下时光标离滑块左边缘多远，拖动时保持这个距离
 
-    // 选中的胶囊滑过去，而不是瞬间挪位置；hover 底色和焦点环也是淡入的
-    private readonly Anim _posA, _hoverA, _focusA;
+    // 选中的胶囊滑过去，而不是瞬间挪位置；hover 底色、按下的回弹和焦点环也是淡入的
+    private readonly Anim _posA, _hoverA, _pressA, _focusA;
 
     public Segment()
     {
@@ -26,6 +26,7 @@ internal sealed class Segment : Control
                  | ControlStyles.UserPaint | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
         _posA = new Anim(this, 0, 200);
         _hoverA = new Anim(this, 0, 120);
+        _pressA = new Anim(this, 0, 90);
         _focusA = new Anim(this, 0, 120);
         Font = Theme.FontBase;
         BackColor = Theme.Bg;
@@ -51,13 +52,40 @@ internal sealed class Segment : Control
 
     public int Count => _items.Count;
 
-    /// <summary>整条重排（宿舍列表变了就得重来一遍）。</summary>
-    public void Clear()
+    /// <summary>
+    /// 整条换内容，选中的那一格<b>尽量留在原处</b>。
+    ///
+    /// 宿舍列表变了就得重排，但设置里换个宿舍会把整页重摆一遍，主窗口保存一次设置也会重排一次；
+    /// 要是每次都清空再选回来，滑块先弹回第一格再滑回去，看着就是"回弹"。所以内容没变时什么都不动，
+    /// 真变了也直接把滑块摆到该在的位置，不让它从旧格子滑过来。
+    /// </summary>
+    public void SetItems(IEnumerable<(string Text, object Tag)> items, object? select = null)
     {
-        _items.Clear();
-        _index = 0;
-        _posA.Set(0);
-        _hover = -1;
+        var list = items.ToList();
+        bool same = list.Count == _items.Count;
+        for (int i = 0; same && i < list.Count; i++)
+            same = list[i].Text == _items[i].Text && Equals(list[i].Tag, _items[i].Tag);
+
+        if (!same)
+        {
+            _items.Clear();
+            _items.AddRange(list);
+            // 悬停底色和焦点环也一起归零：内容整条换了，还留着上一条的高亮就是一块对不上的亮斑
+            _hover = -1;
+            _hoverA.Set(0);
+            _pressing = _dragging = false;
+            _pressA.Set(0);
+            _index = Math.Clamp(_index, 0, Math.Max(0, _items.Count - 1));
+            _posA.Set(_index);
+        }
+
+        int want = select is null ? -1 : _items.FindIndex(x => Equals(x.Tag, select));
+        if (want >= 0)
+        {
+            _index = want;
+            if (same) _posA.To(want); else _posA.Set(want);
+        }
+
         Invalidate();
     }
 
@@ -67,9 +95,9 @@ internal sealed class Segment : Control
     public void Select(object tag)
     {
         int i = _items.FindIndex(x => Equals(x.Tag, tag));
-        if (i < 0 || i == _index) return;
+        if (i < 0) return;
         _index = i;
-        _posA.To(i);
+        _posA.To(i);   // 已经在滑过去了就不会重来一遍，拖歪了也会自己吸附回去
     }
 
     /// <summary>按每格宽度自动定宽（两头还要留出玻璃外的投影和内圈的空隙）。</summary>
@@ -109,7 +137,7 @@ internal sealed class Segment : Control
     {
         base.OnMouseMove(e);
 
-        // 按住滑块横着拖：滑块跟着手走，经过哪一格就切到哪一格，松手再吸附回格子中间
+        // 按住滑块横着拖：经过哪一格就切到哪一格，松手再吸附回格子中间
         if (_pressing)
         {
             if (!_dragging && Math.Abs(e.X - _pressX) < 3) return;
@@ -169,6 +197,7 @@ internal sealed class Segment : Control
         _dragging = false;
         _pressX = e.X;
         _grabDx = e.X - CellRect(i).Left;
+        _pressA.To(1);
     }
 
     /// <summary>点出来的焦点不画环，只有 Tab 走过来才画。</summary>
@@ -214,6 +243,7 @@ internal sealed class Segment : Control
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
+        _pressA.To(0);
         if (!_pressing) return;
         _pressing = false;
         Cursor = Cursors.Hand;
@@ -235,7 +265,6 @@ internal sealed class Segment : Control
         float rad = box.Height / 2f;
         Theme.Glass(g, box, rad, _hover >= 0 ? 0.25f : 0.1f);
 
-        // Tab 走到这一条上：整条外圈描亮，提示"现在方向键管这里"
         Theme.FocusRing(g, box, rad, (float)_focusA.Value);
 
         // 悬停底色画在滑块下面，不然滑块经过时会被盖住
@@ -249,16 +278,19 @@ internal sealed class Segment : Control
 
         float pos = (float)_posA.Value;
         RectangleF sel = CellRect(pos);
+        // 按下时那颗胶囊缩一点点，手底下有反应；拖着的时候不缩，不然像被捏住了
+        float press = _dragging ? 0f : (float)_pressA.Value;
+        if (press > 0.004f) sel.Inflate(-1.2f * press, -1.2f * press);
         if (_items.Count > 0 && sel.Width >= 1 && sel.Height >= 1)
         {
             // 选中那颗是"有颜色的玻璃"：主色渐变打底，再套一层亮边和顶上的反光
-            Theme.Shadow(g, sel, sel.Height / 2f, 0.9f);
+            Theme.Shadow(g, sel, sel.Height / 2f, 0.9f - 0.35f * press);
             using (GraphicsPath sp = Theme.RoundedRect(sel, sel.Height / 2f))
             using (var brush = new LinearGradientBrush(RectangleF.Inflate(sel, 1f, 1f),
                        Theme.Mix(Theme.Accent, Color.White, 0.16f),
                        Theme.Mix(Theme.Accent, Color.Black, 0.08f), LinearGradientMode.Vertical))
                 g.FillPath(brush, sp);
-            Theme.Gloss(g, sel, sel.Height / 2f, 0.4f);
+            Theme.Gloss(g, sel, sel.Height / 2f, 0.4f + 0.25f * press);
         }
 
         for (int i = 0; i < _items.Count; i++)

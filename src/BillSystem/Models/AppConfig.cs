@@ -7,9 +7,8 @@ namespace BillSystem.Models;
 public sealed class AppConfig
 {
     /// <summary>
-    /// 电价：<b>三分之二元一度</b>（0.666…，6 循环），学校定的，界面上改不了。
-    /// 写成 <c>2.0 / 3.0</c> 而不是抄几位 0.6666——小数点后截断会让"充 60 元该进来 90 度"
-    /// 差出零点几度，柱子和记录里的度数都跟着偏。
+    /// 电价：<b>三分之二元一度</b>（0.666…，6 循环），学校定的，界面上改不了。写成 <c>2.0 / 3.0</c>
+    /// 而不是抄几位 0.6666——小数点后截断会让"充 60 元该进来 90 度"差出零点几度。
     /// </summary>
     public const double PricePerKwh = 2.0 / 3.0;
 
@@ -51,7 +50,7 @@ public sealed class AppConfig
     /// <summary>
     /// 发件的 QQ 邮箱地址。<b>所有宿舍共用这一个发件箱</b>（一个授权码只对应一个邮箱），
     /// 什么时候提醒、提醒谁都是按间配的，见 <see cref="Dorm.LowThreshold"/> 和
-    /// <see cref="Dorm.MailTo"/>；发件人显示名写的是对应那间的房号。
+    /// <see cref="Dorm.MailTo"/>。
     /// </summary>
     public string MailFrom { get; set; } = "";
 
@@ -64,6 +63,19 @@ public sealed class AppConfig
     public bool StartWithWindows { get; set; }
 
     public Granularity Granularity { get; set; } = Granularity.Day;
+
+    // ---------- 窗口 ----------
+
+    /// <summary>
+    /// 充值窗口上次关掉时的位置（屏幕坐标）。<see cref="int.MinValue"/> 表示还没记过，
+    /// 那就照旧摆在主窗口正中间。
+    /// </summary>
+    public int RechargeX { get; set; } = int.MinValue;
+
+    public int RechargeY { get; set; } = int.MinValue;
+
+    [JsonIgnore]
+    public bool HasRechargePos => RechargeX != int.MinValue && RechargeY != int.MinValue;
 
     // ---------- 持久化 ----------
 
@@ -133,8 +145,8 @@ public sealed class AppConfig
                 if (cfg is not null)
                 {
                     cfg.Normalize();
-                    // 顺手写回去：新版本加的字段（老文件里没有，走的是默认值）和被 Normalize
-                    // 夹回范围的值都落进文件，自己翻 config.json 时看到的就是程序真在用的那份
+                    // 顺手写回去：新版本加的字段和被 Normalize 夹回范围的值都落进文件，
+                    // 自己翻 config.json 时看到的就是程序真在用的那份
                     cfg.Save();
                     return cfg;
                 }
@@ -185,6 +197,10 @@ public sealed class AppConfig
         return c;
     }
 
+    /// <summary>
+    /// 把设置窗口那份副本写回来。<b>只搬设置页面上能改的字段</b>：粒度、充值窗口位置这些是
+    /// 主界面自己随手存的，副本里是打开设置那一刻的旧值，搬回来等于把用户刚做的操作撤销掉。
+    /// </summary>
     public void CopyFrom(AppConfig o)
     {
         Dorms = o.Dorms.Select(d => d.Clone()).ToList();
@@ -195,7 +211,6 @@ public sealed class AppConfig
         MailFrom = o.MailFrom;
         MailAuthCode = o.MailAuthCode;
         StartWithWindows = o.StartWithWindows;
-        Granularity = o.Granularity;
         Normalize();
     }
 }

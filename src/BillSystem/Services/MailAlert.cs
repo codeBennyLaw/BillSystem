@@ -7,20 +7,15 @@ using BillSystem.Models;
 namespace BillSystem.Services;
 
 /// <summary>
-/// 低电量邮件提醒，走 QQ 邮箱的 SMTP。
+/// 低电量邮件提醒，走 QQ 邮箱的 SMTP：smtp.qq.com:587 + STARTTLS，密码是邮箱设置→账号里生成的
+/// <b>授权码</b>（16 位字母），不是 QQ 密码。发件箱所有宿舍共用，<b>收件人按间配</b>
+/// （<see cref="Dorm.MailTo"/>），发件人显示名写成触发那一间的房号。
 ///
-/// smtp.qq.com:587 + STARTTLS，用户名是那个 QQ 邮箱地址，密码是邮箱设置→账号里生成的
-/// <b>授权码</b>（16 位字母），不是 QQ 密码。授权码没填就直接跳过，不当成错误。
+/// 信发成 multipart/alternative：HTML 那份在手机上一眼看到剩多少，纯文本那份保证任何客户端
+/// （和通知栏预览）都读得出来。
 ///
-/// 发件箱是所有宿舍共用的，<b>收件人按间配</b>（<see cref="Dorm.MailTo"/>），
-/// 发件人显示名写成触发那一间的房号。
-///
-/// 信发成 multipart/alternative：HTML 那份在手机上一眼看到剩多少、还能用多久，
-/// 纯文本那份保证任何客户端（和通知栏预览）都读得出来。
-///
-/// 用的是 <see cref="SmtpClient"/>：.NET 把它标了 obsolete（SYSLIB0014 只针对
-/// WebRequest 那一套，SmtpClient 是 <c>[Obsolete]</c> 的建议性警告），但本程序不引第三方包，
-/// 框架里也只有这一个能发信的东西，所以这里显式压掉那条警告。
+/// <see cref="SmtpClient"/> 被标了 <c>[Obsolete]</c>，但本程序不引第三方包，框架里只有它能发信，
+/// 所以显式压掉那条警告。
 /// </summary>
 internal static class MailAlert
 {
@@ -51,10 +46,8 @@ internal static class MailAlert
     internal readonly record struct Letter(string Subject, string Text, string Html, string FromName);
 
     /// <summary>
-    /// 标题和发件人显示名。手机上弹的邮件通知卡只给这两行：标题喊那句话，发件人报是哪个房间，
-    /// 不用点开就知道是什么事、是谁的电快没了。几间宿舍共用一个发件箱，
-    /// 发件人显示名写的是<b>触发提醒那一间</b>的房号，一眼分得清。
-    /// 真的那封和"试一封"用同一套，写死在程序里，设置里没有对应项。
+    /// 手机上弹的邮件通知卡只给标题和发件人两行：标题喊那句话，发件人报是哪个房间，
+    /// 不用点开就知道是什么事、是谁的电快没了。写死在程序里，设置里没有对应项。
     /// </summary>
     private const string Subject = "电量告急！将军救急！";
 
@@ -131,8 +124,8 @@ internal static class MailAlert
     }
 
     /// <summary>
-    /// 预计可用 / 日均 / 今日 / 本月这几行。历史太短算不出来的就整行不写——
-    /// 宁可少一行，也别摆个"—"让人以为程序坏了。
+    /// 预计可用 / 日均 / 今日 / 本月这几行。算不出来的整行不写——宁可少一行，
+    /// 也别摆个"—"让人以为程序坏了。
     /// </summary>
     private static void Forecast(List<(string, string)> rows, Summary? s)
     {
@@ -173,9 +166,8 @@ internal static class MailAlert
 
     /// <summary>
     /// HTML 那份：一张白卡片，最上面是剩余度数（低于阈值是红的，"快见底"是黄的），
-    /// 底下是一行一个数的表格，末尾一小段说明。
-    ///
-    /// 全部用 table + 行内样式：邮件客户端普遍不认 <c>&lt;style&gt;</c>、flex 和 CSS 变量。
+    /// 底下一行一个数。全部用 table + 行内样式：邮件客户端普遍不认
+    /// <c>&lt;style&gt;</c>、flex 和 CSS 变量。
     /// </summary>
     private static string HtmlBody(
         string room, string big, string? sub, string lead,
@@ -241,19 +233,17 @@ internal static class MailAlert
 
         using var msg = new MailMessage
         {
-            // 显示名就是这一间的房号：几间宿舍共用一个发件箱，收件人靠这行分得清是谁的电快没了
+            // 显示名是这一间的房号：几间共用一个发件箱，收件人靠这行分得清是谁的电快没了
             From = new MailAddress(from, letter.FromName, Encoding.UTF8),
             Subject = letter.Subject,
             SubjectEncoding = Encoding.UTF8,
         };
-        // 两份都挂成 AlternateView（Body 留空）就是标准的 multipart/alternative：
-        // 客户端认 HTML 就显示卡片，不认就退回纯文本，顺序是从素到花
+        // 两份都挂成 AlternateView（Body 留空）就是标准的 multipart/alternative，顺序从素到花
         msg.AlternateViews.Add(AlternateView.CreateAlternateViewFromString(
             letter.Text, Encoding.UTF8, MediaTypeNames.Text.Plain));
         msg.AlternateViews.Add(AlternateView.CreateAlternateViewFromString(
             letter.Html, Encoding.UTF8, MediaTypeNames.Text.Html));
 
-        // 这一间的收件人都放在收件人里，一封信同时到几边
         foreach (string one in to) msg.To.Add(new MailAddress(one));
 
         try

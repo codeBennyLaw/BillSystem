@@ -50,8 +50,8 @@ internal static class Program
     }
 
     /// <summary>
-    /// 自检 / 出图各用一个空数据目录，摆在 exe 旁边（截图里不会带上用户名），每次跑之前清一遍。
-    /// 有了它，这两个开关碰不到用户真实的 jsonl 和 config.json。
+    /// 自检 / 出图各用一个空数据目录，摆在 exe 旁边（截图里不会带上用户名），每次跑之前清一遍——
+    /// 这两个开关碰不到用户真实的 jsonl 和 config.json。
     /// </summary>
     private static string Sandbox(string what)
     {

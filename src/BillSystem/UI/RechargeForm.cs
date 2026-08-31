@@ -6,10 +6,8 @@ namespace BillSystem.UI;
 
 /// <summary>
 /// 充值窗口：上面一张玻璃卡里选金额 + 生成付款码，下面整块是这个房间的充值记录。
-///
-/// 码不画在这个窗口里，而是弹一个 <see cref="QrDialog"/>，按钮都在码底下。学校那边的码
-/// 只活几分钟，过期就自动重新下一单换一张；取消（或关掉弹窗）之后再申请就是全新的一单。
-/// 下单之后每 3 秒查一次订单，付上了立刻刷一次电量和历史。
+/// 码不画在这个窗口里，而是弹一个 <see cref="QrDialog"/>。学校那边的码只活几分钟，过期就自动
+/// 重新下一单换一张；取消（或关掉弹窗）之后再申请就是全新的一单。下单之后每 3 秒查一次订单。
 /// </summary>
 internal sealed class RechargeForm : Form, Theme.IBackdropHost
 {
@@ -21,6 +19,9 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
     private const int CardBottom = 152;      // 上面那张卡到哪儿
 
     private readonly RechargeApi _api;
+
+    /// <summary>关窗口时把位置记在这儿。</summary>
+    private readonly AppConfig _cfg;
 
     /// <summary>充的是这一间。主界面切了宿舍就 <see cref="Bind"/> 换过来。</summary>
     private DormSession _s;
@@ -57,24 +58,24 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
     private bool _paid;
 
     /// <summary>
-    /// 窗口活着期间的总闸。关掉窗口就把还在飞的下单/查单/拉历史一起取消，
-    /// 不留着几个请求慢慢超时。链出去的子 CTS 可能比它活得久，所以这个不 Dispose。
+    /// 窗口活着期间的总闸：关掉窗口就把还在飞的下单/查单/拉历史一起取消。
+    /// 链出去的子 CTS 可能比它活得久，所以这个不 Dispose。
     /// </summary>
     private readonly CancellationTokenSource _life = new();
 
     /// <summary>充值成功后触发，让外面立刻查一次电量。</summary>
     public event Action? PaidSuccessfully;
 
-    public RechargeForm(RechargeApi api, DormSession session, bool offline = false)
+    public RechargeForm(RechargeApi api, AppConfig cfg, DormSession session, bool offline = false)
     {
         _api = api;
+        _cfg = cfg;
         _s = session;
 
         Text = "电费充值";
         ClientSize = new Size(W, H);
         MinimumSize = new Size(W, H);
         MaximumSize = new Size(W + 400, H + 400);
-        StartPosition = FormStartPosition.CenterParent;
         MinimizeBox = false;
         ShowInTaskbar = false;
         BackColor = Theme.Bg;
@@ -82,6 +83,7 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
         Font = Theme.FontBase;
         DoubleBuffered = true;
         Theme.ApplyDarkChrome(this);
+        RestorePlace();
 
         Build();
         Layout1();
@@ -96,13 +98,44 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
         Fade.In(this);
     }
 
-    /// <summary>Tab 顺序照界面从上到下、从左到右来：先挑金额，再下单。</summary>
+    /// <summary>Tab 顺序照界面来：先挑金额，再下单。</summary>
     private void TabOrder()
     {
         int i = 0;
         foreach (UiButton b in _presetBtns) b.TabIndex = i++;
         _custom.TabIndex = i++;
         _btnPay.TabIndex = i;
+    }
+
+    /// <summary>
+    /// 摆回上次关掉时的位置。第一次打开（还没记过）才摆在主窗口正中；
+    /// 记下的位置可能已经不在屏幕上了（换了显示器、拔了扩展屏），夹回可见区域再用。
+    /// </summary>
+    private void RestorePlace()
+    {
+        if (!_cfg.HasRechargePos)
+        {
+            StartPosition = FormStartPosition.CenterParent;
+            return;
+        }
+
+        StartPosition = FormStartPosition.Manual;
+        var at = new Point(_cfg.RechargeX, _cfg.RechargeY);
+        Rectangle work = Screen.FromPoint(at).WorkingArea;
+        Location = new Point(
+            Math.Clamp(at.X, work.Left, Math.Max(work.Left, work.Right - Width)),
+            Math.Clamp(at.Y, work.Top, Math.Max(work.Top, work.Bottom - Height)));
+    }
+
+    /// <summary>关窗口时记下位置，下次打开还在这儿。最小化/最大化着关就记还原后的那个位置。</summary>
+    private void RememberPlace()
+    {
+        Rectangle b = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+        if (b.Width <= 0 || b.Height <= 0) return;
+        if (_cfg.RechargeX == b.X && _cfg.RechargeY == b.Y) return;
+        _cfg.RechargeX = b.X;
+        _cfg.RechargeY = b.Y;
+        _cfg.Save();
     }
 
     /// <summary>出图用：主窗口摆一句状态，不下单、不联网。</summary>
@@ -151,7 +184,7 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
             Controls.Add(b);
         }
 
-        // 输入框里有东西就以它为准：非空且在 1~1000 之间就能直接下单，不用先点预设
+        // 输入框里有东西就以它为准，不用先点预设
         _custom.TextEdited += ApplyCustom;
         _custom.Submitted += () => { if (_amountOk && !_busy) _ = StartOrderAsync(); };
         Controls.Add(_custom);
@@ -198,9 +231,12 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
     {
         int w = ClientSize.Width, h = ClientSize.Height;
 
-        // 尺寸变了，底图上那张卡也得跟着重画
-        _backdrop?.Dispose();
-        _backdrop = null;
+        // 底图上那张玻璃卡是按窗口宽度画死的，宽高真变了才重画——Layout1 还会因为换房间之类的走一遍
+        if (_backdrop is not null && _backdrop.Size != ClientSize)
+        {
+            _backdrop.Dispose();
+            _backdrop = null;
+        }
 
         _who.SetBounds(Pad, 18, 320, 28);
 
@@ -260,7 +296,7 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
     private void SetYuan(int yuan)
     {
         _yuan = Math.Clamp(yuan, RechargeApi.MinYuan, RechargeApi.MaxYuan);
-        // 只有一个按钮该是亮的；Kind 变了控件会自己重画，不会留着上一个的高亮
+        // 只有一个按钮该是亮的
         foreach (UiButton b in _presetBtns)
             b.Kind = b.Text == $"{_yuan} 元" ? BtnKind.Primary : BtnKind.Ghost;
         _dlg?.SetAmount(_yuan);
@@ -274,11 +310,10 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
         _btnPay.Enabled = _amountOk && !_busy;
     }
 
-    private void SetStateText(string text, Color color)
-    {
-        _state.ForeColor = color;
-        _state.Text = text;
-    }
+    private void SetStateText(string text, Color color) => _state.Say(text, color);
+
+    /// <summary>一单走完了才说的那句话（成功 / 失败 / 取消）：说完自己淡走，不赖在窗口上。</summary>
+    private void FlashState(string text, Color color, int holdMs = 6000) => _state.Flash(text, color, holdMs);
 
     // ---------- 付款码弹窗 ----------
 
@@ -352,7 +387,7 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
             if (gen != _orderGen || IsDisposed) return;
             _order = null;
             string msg = ex is ElectricityApiException ? ex.Message : $"下单失败：{ex.Message}";
-            SetStateText(msg, Theme.Bad);
+            FlashState(msg, Theme.Bad);
             _dlg?.Finish("下单失败", msg, Theme.Bad, allowAgain: true);
         }
         finally
@@ -376,7 +411,7 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
         _work = null;
         _order = null;
         _busy = false;
-        if (note is not null) SetStateText(note, Theme.TextSub);
+        if (note is not null) FlashState(note, Theme.TextSub, 4000);
     }
 
     /// <summary>一秒一跳：更新倒计时、到期就换码、顺便每 3 秒查一次订单。</summary>
@@ -421,7 +456,7 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
                 case PayResult.Paid:
                     _paid = true;
                     _order = null;
-                    SetStateText($"充值成功 · {_yuan} 元", Theme.Good);
+                    FlashState($"充值成功 · {_yuan} 元", Theme.Good, 8000);
                     _dlg?.Finish($"{_yuan} 元已到账", $"充值成功 · {_yuan} 元", Theme.Good, allowAgain: false);
                     PaidSuccessfully?.Invoke();
                     await ReloadHistoryAsync();
@@ -429,7 +464,7 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
 
                 case PayResult.Failed:
                     _order = null;
-                    SetStateText("这一单支付失败，可以再生成一张", Theme.Bad);
+                    FlashState("这一单支付失败，可以再生成一张", Theme.Bad);
                     _dlg?.Finish("这一单失败了", "支付失败，可以再生成一张", Theme.Bad, allowAgain: true);
                     break;
             }
@@ -445,9 +480,10 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
     private void ShowLocal()
     {
         _list.SetItems(Store.Snapshot());
-        _histSum.Text = Store.Count == 0
+        _histSum.Say(Store.Count == 0
             ? "还没有充值记录"
-            : $"共 {Store.Count} 笔 · 累计 {Store.TotalYuan():0.##} 元 · 本月 {Store.MonthTotalYuan():0.##} 元";
+            : $"共 {Store.Count} 笔 · 累计 {Store.TotalYuan():0.##} 元 · 本月 {Store.MonthTotalYuan():0.##} 元",
+            Theme.TextDim);
     }
 
     private async Task ReloadHistoryAsync()
@@ -469,7 +505,8 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
         {
             if (IsDisposed) return;
             ShowLocal();
-            _histSum.Text = $"记录没拉到：{ex.Message}";
+            // 说一声就好，几秒后自己让回"共 N 笔 · 累计…"，本地那份记录照样能翻
+            _histSum.Flash($"记录没拉到：{ex.Message}", Theme.Bad, 5000, _histSum.Text, Theme.TextDim);
         }
     }
 
@@ -481,6 +518,7 @@ internal sealed class RechargeForm : Form, Theme.IBackdropHost
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        RememberPlace();
         _life.Cancel();
         CancelOrder(null);
         DropDialog();

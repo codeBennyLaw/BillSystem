@@ -55,7 +55,7 @@ public sealed class DormFiles
                 }
                 catch (IOException)
                 {
-                    // 文件被占着就只算不进行数，照样列出来
+                    // 文件被占着就数不出行数，照样列出来
                 }
 
                 if (reading) f.ReadingLines += lines;

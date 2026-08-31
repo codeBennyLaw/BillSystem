@@ -247,7 +247,6 @@ internal sealed class QrCode
     private void DrawCodewords(byte[] data)
     {
         int i = 0;
-        // 从右下角起，每两列一组往左走；组内上下折返
         for (int col = Size - 1; col >= 1; col -= 2)
         {
             int right = col <= 6 ? col - 1 : col;   // 第 6 列是定位虚线，整组左移一格

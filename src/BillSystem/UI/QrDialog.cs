@@ -1,10 +1,8 @@
 namespace BillSystem.UI;
 
 /// <summary>
-/// 付款码弹窗：一张码 + 底下三行字 + 两个按钮。
-///
-/// 它自己不下单也不查单——那些还是充值窗口管着，这儿只负责显示。关掉就等于取消这一单，
-/// 再点"生成付款码"会重新向学校那边申请一张新的。
+/// 付款码弹窗：一张码 + 底下三行字 + 两个按钮。它自己不下单也不查单，那些还是充值窗口管着。
+/// 关掉就等于取消这一单，再点"生成付款码"会重新向学校那边申请一张新的。
 /// </summary>
 internal sealed class QrDialog : Form
 {
@@ -82,7 +80,6 @@ internal sealed class QrDialog : Form
         _btnClose.SetBounds(w - Pad - 132, _qr.Bottom + 46, 132, 34);
     }
 
-    /// <summary>标题上那个金额。</summary>
     public void SetAmount(int yuan) => _amount.Text = $"{yuan} 元";
 
     /// <summary>码还没拿到，先在方框里摆一句话。</summary>
@@ -95,7 +92,6 @@ internal sealed class QrDialog : Form
         _btnClose.Kind = BtnKind.Quiet;
     }
 
-    /// <summary>把码摆上去。</summary>
     public void ShowQr(string payload)
     {
         _qr.Payload = payload;

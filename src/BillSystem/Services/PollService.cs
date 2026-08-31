@@ -33,7 +33,7 @@ public sealed class PollService : IDisposable
     /// <summary>每次查询完成（成功或失败）都会触发。</summary>
     public event Action<PollStatus>? StatusChanged;
 
-    /// <summary>整点读数有变化时触发（数据变了，图表该刷新了）。</summary>
+    /// <summary>整点读数有变化时触发。</summary>
     public event Action<Reading>? NewReading;
 
     public PollStatus Status { get; private set; } = new();
@@ -88,11 +88,8 @@ public sealed class PollService : IDisposable
 
     /// <summary>
     /// 下一次查询的时刻：<b>每个整点和每个半点</b>（xx:00:00 / xx:30:00）。
-    ///
-    /// 读数记在整点那一格上（3:00 查到的一条减 2:00 那条 = 两点这一格的用电量），
-    /// 半点那一次落的是<b>同一格</b>：查到的值变了就顶替掉这一格里原来那条，
-    /// 一样就当没这回事（<see cref="ReadingStore.TryAdd"/> 直接返回 false，不写盘也不重画）。
-    /// 学校两三个小时才抄一次表，多这一次不会凭空多出数据点，但抄表一上传就能早半小时看到。
+    /// 半点那一次落的是同一格，值一样就当没这回事（<see cref="ReadingStore.TryAdd"/> 返回 false）。
+    /// 学校两三个小时才抄一次表，多查这一次不会凭空多出数据点，但抄表一上传就能早半小时看到。
     /// </summary>
     internal static TimeSpan NextDelay(DateTime now)
     {

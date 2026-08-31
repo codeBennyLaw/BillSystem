@@ -91,8 +91,8 @@ public sealed class RechargeApi : IDisposable
 
     /// <summary>
     /// 下一笔微信充值单，拿回二维码文本。<paramref name="yuan"/> 是元，接口要的是分。
-    /// <c>mobile</c> 照网页的样子留在 body 里但给空串——学校那边只拿它发短信通知，不填也能下单；
-    /// 整个键去掉反而有可能碰上服务端的非空校验，所以留着。
+    /// <c>mobile</c> 留在 body 里但给空串——学校那边只拿它发短信通知，整个键去掉反而有可能
+    /// 碰上服务端的非空校验。
     /// </summary>
     public async Task<RechargeOrder> CreateWeixinOrderAsync(
         int building, int room, int yuan, CancellationToken ct = default)
