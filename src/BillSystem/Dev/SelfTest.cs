@@ -373,16 +373,16 @@ internal static class SelfTest
     /// </summary>
     private static void CheckMail(Action<string, bool, string> check, Summary s)
     {
-        var cfg = new AppConfig
+        var cfg = new AppConfig { MailFrom = "a@qq.com", MailAuthCode = "0123456789abcdef" };
+        var dorm = new Dorm(43, 422)
         {
             LowThreshold = 5, LowDaysThreshold = 0.5,
-            MailFrom = "a@qq.com", MailAuthCode = "0123456789abcdef",
+            MailTo = { "me@qq.com", "you@wyu.edu.cn" },
         };
-        var dorm = new Dorm(43, 422) { MailTo = { "me@qq.com", "you@wyu.edu.cn" } };
         Reading r = R(new DateTime(2026, 8, 30, 12, 0, 0), 3352.2, 4.2);
 
-        MailAlert.Letter low = MailAlert.LowLetter(cfg, dorm, r, s, true);
-        MailAlert.Letter soon = MailAlert.LowLetter(cfg, dorm, r, s, false);
+        MailAlert.Letter low = MailAlert.LowLetter(dorm, r, s, true);
+        MailAlert.Letter soon = MailAlert.LowLetter(dorm, r, s, false);
 
         check("两种触发的标题都是那句告急",
             low.Subject == "电量告急！将军救急！" && soon.Subject == low.Subject, low.Subject);
@@ -395,7 +395,7 @@ internal static class SelfTest
         check("末尾写清两个提醒条件",
             low.Text.Contains("剩余低于 5 度，或预计可用不足 0.5 天"), "");
         check("天数调到 0 时只写度数那一条",
-            MailAlert.LowLetter(new AppConfig { LowThreshold = 5, LowDaysThreshold = 0 }, dorm, r, s, true)
+            MailAlert.LowLetter(new Dorm(43, 422) { LowThreshold = 5 }, r, s, true)
                 .Text.Contains("提醒条件：剩余低于 5 度。"), "");
         check("HTML 那份也带着度数和抄表时间",
             low.Html.Contains("4.20") && low.Html.Contains("抄表时间"), "");
@@ -406,18 +406,21 @@ internal static class SelfTest
             && t.Text.Contains("剩余电量：")
             && t.Text.Contains(dorm.MailToLine), "");
         check("没有汇总数字时也生成得出来",
-            MailAlert.LowLetter(cfg, dorm, r, null, true).Text.Contains("剩余电量：4.20 度"), "");
+            MailAlert.LowLetter(dorm, r, null, true).Text.Contains("剩余电量：4.20 度"), "");
         check("发件人显示的是那一间的房号", low.FromName == "43栋422", low.FromName);
         check("测试信的标题和发件人跟真的那封一样",
             MailAlert.TestLetter(cfg, dorm, s) is { } t2
             && t2.Subject == low.Subject && t2.FromName == low.FromName,
             $"{MailAlert.TestLetter(cfg, dorm, s).Subject} / {MailAlert.TestLetter(cfg, dorm, s).FromName}");
 
-        // 另一间的信写的是另一间的房号和收件人，两间互不相干
-        var other = new Dorm(12, 108) { MailTo = { "other@qq.com" } };
-        MailAlert.Letter otherLow = MailAlert.LowLetter(cfg, other, r, s, true);
+        // 另一间的信写的是另一间的房号、收件人和阈值，两间互不相干
+        var other = new Dorm(12, 108) { LowThreshold = 20, MailTo = { "other@qq.com" } };
+        MailAlert.Letter otherLow = MailAlert.LowLetter(other, r, s, true);
         check("换一间就换发件人", otherLow.FromName == "12栋108", otherLow.FromName);
         check("信里说的是那一间", otherLow.Text.Contains("12栋108 的剩余电量"), "");
+        check("信里的阈值也是那一间自己的",
+            otherLow.Text.Contains("已经低于 20 度")
+            && otherLow.Text.Contains("提醒条件：剩余低于 20 度。"), "");
         check("测试信收件人只列这一间的",
             MailAlert.TestLetter(cfg, other, s).Text.Contains("other@qq.com")
             && !MailAlert.TestLetter(cfg, other, s).Text.Contains("me@qq.com"), "");
@@ -433,6 +436,7 @@ internal static class SelfTest
 
     /// <summary>
     /// 配置和宿舍名单：房号认得回来、加重了要去掉、当前那间没了要落回第一间，
+    /// 提醒（阈值、开关、收件人）是一间一套，
     /// 还有设置窗口拿的那份副本必须是真副本（改副本不能动到正在跑的配置）。
     /// </summary>
     private static void CheckConfig(Action<string, bool, string> check)
@@ -448,14 +452,16 @@ internal static class SelfTest
         {
             Dorms =
             {
-                new Dorm(43, 422) { MailEnabled = true, MailTo = { " me@qq.com ", "me@QQ.com", "" } },
+                new Dorm(43, 422)
+                {
+                    LowThreshold = 5000, LowDaysThreshold = -3,
+                    MailEnabled = true, MailTo = { " me@qq.com ", "me@QQ.com", "" },
+                },
                 new Dorm(43, 422),
                 new Dorm(0, 0),
-                new Dorm(12, 108),
+                new Dorm(12, 108) { LowThreshold = 25, LowDaysThreshold = 1.5 },
             },
             CurrentDorm = "B99-R9",
-            LowThreshold = 5000,
-            LowDaysThreshold = -3,
         };
         cfg.Normalize();
 
@@ -466,24 +472,35 @@ internal static class SelfTest
             cfg.Dorms[0].MailTo.Count == 1 && cfg.Dorms[0].MailTo[0] == "me@qq.com",
             string.Join("|", cfg.Dorms[0].MailTo));
         check("阈值夹回范围内",
-            Math.Abs(cfg.LowThreshold - 1000) < 1e-9 && cfg.LowDaysThreshold == 0,
-            $"{cfg.LowThreshold} / {cfg.LowDaysThreshold}");
+            Math.Abs(cfg.Dorms[0].LowThreshold - 1000) < 1e-9 && cfg.Dorms[0].LowDaysThreshold == 0,
+            $"{cfg.Dorms[0].LowThreshold} / {cfg.Dorms[0].LowDaysThreshold}");
+        check("阈值是按间存的，一间一套",
+            Math.Abs(cfg.Dorms[1].LowThreshold - 25) < 1e-9
+            && Math.Abs(cfg.Dorms[1].LowDaysThreshold - 1.5) < 1e-9,
+            $"{cfg.Dorms[1].LowThreshold} / {cfg.Dorms[1].LowDaysThreshold}");
+        check("没配过的那间用默认的 10 度、不看天数",
+            Math.Abs(new Dorm(43, 422).LowThreshold - 10) < 1e-9
+            && new Dorm(43, 422).LowDaysThreshold == 0, "");
 
         // 设置窗口在副本上改，点取消就该什么都没变
         AppConfig copy = cfg.Clone();
         copy.Dorms[0].MailTo.Add("new@qq.com");
         copy.Dorms[0].NotifyEnabled = true;
+        copy.Dorms[0].LowThreshold = 30;
         copy.Dorms.Add(new Dorm(7, 701));
         check("副本加收件人不影响原来那份", cfg.Dorms[0].MailTo.Count == 1,
             cfg.Dorms[0].MailTo.Count.ToString());
         check("副本改开关不影响原来那份", !cfg.Dorms[0].NotifyEnabled, "");
+        check("副本改阈值不影响原来那份",
+            Math.Abs(cfg.Dorms[0].LowThreshold - 1000) < 1e-9, cfg.Dorms[0].LowThreshold.ToString());
         check("副本加宿舍不影响原来那份", cfg.Dorms.Count == 2, cfg.Dorms.Count.ToString());
 
         // 点了保存：整份抄回来，宿舍还是各自独立的对象
         cfg.CopyFrom(copy);
         check("保存后抄回了新加的那间", cfg.Dorms.Count == 3, cfg.Dorms.Count.ToString());
         check("保存后抄回了按间配的提醒",
-            cfg.Dorms[0].NotifyEnabled && cfg.Dorms[0].MailTo.Count == 2,
+            cfg.Dorms[0].NotifyEnabled && cfg.Dorms[0].MailTo.Count == 2
+            && Math.Abs(cfg.Dorms[0].LowThreshold - 30) < 1e-9,
             string.Join("|", cfg.Dorms[0].MailTo));
         copy.Dorms[0].MailTo.Clear();
         check("抄回来之后两份还是分开的", cfg.Dorms[0].MailTo.Count == 2,
@@ -493,7 +510,8 @@ internal static class SelfTest
         var running = new Dorm(43, 422);
         running.CopyAlertsFrom(cfg.Dorms[0]);
         check("在跑的那间跟得上新设置",
-            running.NotifyEnabled && running.MailTo.Count == 2, "");
+            running.NotifyEnabled && running.MailTo.Count == 2
+            && Math.Abs(running.LowThreshold - 30) < 1e-9, "");
         running.MailTo.Clear();
         check("跟上之后收件人也是各自一份", cfg.Dorms[0].MailTo.Count == 2, "");
     }

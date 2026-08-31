@@ -203,7 +203,7 @@ internal sealed class TrayContext : ApplicationContext
         _widget.UpdateData(st, s.Summarize());
         _main.UpdateStatus(st);
 
-        Color level = Theme.LevelColor(st.Latest?.Remaining, _cfg.LowThreshold);
+        Color level = Theme.LevelColor(st.Latest?.Remaining, s.Dorm.LowThreshold);
         if (st.Latest is null || st.Error is not null) level = Theme.TextSub;
         SetTrayIcon(level);
 
@@ -226,17 +226,16 @@ internal sealed class TrayContext : ApplicationContext
         if (all.Count >= 2 && r.Remaining > all[^2].Remaining + 0.5) _ = SyncRechargesAsync(s);
 
         Summary sum = UsageAggregator.Summarize(all, DateTime.Now);
-        bool low = r.Remaining <= _cfg.LowThreshold;
-        // 度数还够，但照这个用法撑不到设置里那个天数就见底（那项是 0 就不看这一条）
-        bool soon = sum.RunsOutWithin(_cfg.LowDaysThreshold);
+        Dorm d = s.Dorm;
+        bool low = r.Remaining <= d.LowThreshold;
+        // 度数还够，但照这个用法撑不到这间设的那个天数就见底（那项是 0 就不看这一条）
+        bool soon = sum.RunsOutWithin(d.LowDaysThreshold);
 
         if (low || soon)
         {
             if (s.LowNotified) return;
             s.LowNotified = true;
 
-            // 阈值是几间共用的，通知 / 邮件的开关和收件人是这一间自己的
-            Dorm d = s.Dorm;
             if (d.NotifyEnabled)
                 Notify("电量不多了",
                     low
@@ -246,7 +245,7 @@ internal sealed class TrayContext : ApplicationContext
 
             if (d.MailEnabled && MailAlert.Configured(_cfg, d)) _ = SendLowMailAsync(s, r, sum, low);
         }
-        else if (r.Remaining > _cfg.LowThreshold * 1.2)
+        else if (r.Remaining > d.LowThreshold * 1.2)
         {
             // 充过电了，下次再低再提醒
             s.LowNotified = false;
@@ -341,11 +340,16 @@ internal sealed class TrayContext : ApplicationContext
         dlg.TestNotifyRequested += d => Notify("这就是低电量提醒的样子",
             $"{d.Short} 剩余电量低于阈值时，就会弹一条这样的通知。", ToolTipIcon.Info);
 
-        if (dlg.ShowDialog(_main.Visible ? _main : null) != DialogResult.OK) return;
+        // 点了保存就立刻落地，窗口还开着：加了 / 删了宿舍，改了各间的提醒，
+        // 还有组件那几项，改一次生效一次，不用为了看效果先把设置关掉
+        dlg.Saved += () =>
+        {
+            _widget.ApplyConfig(_cfg);
+            _main.ApplyConfig(_cfg);
+            SyncSessions();
+        };
 
-        _widget.ApplyConfig(_cfg);
-        _main.ApplyConfig(_cfg);
-        SyncSessions();     // 加了 / 删了宿舍，改了各间的提醒，还有组件那几项，都在这儿落地
+        dlg.ShowDialog(_main.Visible ? _main : null);
     }
 
     private void ExitApp()

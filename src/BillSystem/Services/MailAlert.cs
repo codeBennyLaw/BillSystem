@@ -64,20 +64,20 @@ internal static class MailAlert
     /// </summary>
     public static Task SendLowAsync(
         AppConfig cfg, Dorm dorm, Reading r, Summary? s = null, bool belowThreshold = true)
-        => SendAsync(cfg, dorm, LowLetter(cfg, dorm, r, s, belowThreshold));
+        => SendAsync(cfg, dorm, LowLetter(dorm, r, s, belowThreshold));
 
     /// <summary>设置里"试一封"用的。带上眼下的数字，跟真的那封长一个样。</summary>
     public static Task SendTestAsync(AppConfig cfg, Dorm dorm, Summary? s = null)
         => SendAsync(cfg, dorm, TestLetter(cfg, dorm, s));
 
-    internal static Letter LowLetter(AppConfig cfg, Dorm dorm, Reading r, Summary? s, bool belowThreshold)
+    internal static Letter LowLetter(Dorm dorm, Reading r, Summary? s, bool belowThreshold)
     {
         string room = dorm.Short;
         string? left = s?.DaysLeftText;
 
         string lead = belowThreshold
-            ? $"{room} 的剩余电量已经低于 {cfg.LowThreshold:0.##} 度，记得充电费。"
-            : $"{room} 的电照现在的用法撑不到 {cfg.LowDaysThreshold:0.##} 天了，记得充电费。";
+            ? $"{room} 的剩余电量已经低于 {dorm.LowThreshold:0.##} 度，记得充电费。"
+            : $"{room} 的电照现在的用法撑不到 {dorm.LowDaysThreshold:0.##} 天了，记得充电费。";
 
         var rows = new List<(string, string)> { ("剩余电量", $"{r.Remaining:0.00} 度") };
         Forecast(rows, s);
@@ -87,9 +87,9 @@ internal static class MailAlert
         string[] notes =
         {
             "充电费：打开“宿舍电费助手”→ 充值，选好金额生成付款码，微信扫一下就行。",
-            cfg.LowDaysThreshold > 0
-                ? $"提醒条件：剩余低于 {cfg.LowThreshold:0.##} 度，或预计可用不足 {cfg.LowDaysThreshold:0.##} 天。"
-                : $"提醒条件：剩余低于 {cfg.LowThreshold:0.##} 度。",
+            dorm.LowDaysThreshold > 0
+                ? $"提醒条件：剩余低于 {dorm.LowThreshold:0.##} 度，或预计可用不足 {dorm.LowDaysThreshold:0.##} 天。"
+                : $"提醒条件：剩余低于 {dorm.LowThreshold:0.##} 度。",
         };
 
         return new Letter(
@@ -116,9 +116,9 @@ internal static class MailAlert
 
         string[] notes =
         {
-            cfg.LowDaysThreshold > 0
-                ? $"真的那封会在 {room} 剩余低于 {cfg.LowThreshold:0.##} 度、或预计可用不足 {cfg.LowDaysThreshold:0.##} 天时发出。"
-                : $"真的那封会在 {room} 剩余低于 {cfg.LowThreshold:0.##} 度时发出。",
+            dorm.LowDaysThreshold > 0
+                ? $"真的那封会在 {room} 剩余低于 {dorm.LowThreshold:0.##} 度、或预计可用不足 {dorm.LowDaysThreshold:0.##} 天时发出。"
+                : $"真的那封会在 {room} 剩余低于 {dorm.LowThreshold:0.##} 度时发出。",
         };
 
         return new Letter(

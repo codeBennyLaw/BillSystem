@@ -341,7 +341,8 @@ internal sealed class MainForm : Form, IMessageFilter
             _status0.Error is not null ? "上次更新失败"
                 : s.MeterTime is { } mt ? $"抄表 {mt:MM-dd HH:mm}"
                 : "",
-            Theme.LevelColor(s.Remaining, _cfg.LowThreshold));
+            // 阈值是这一间自己的；一间都没加时也没有剩余度数，配多少都不影响颜色
+            Theme.LevelColor(s.Remaining, _cur?.Dorm.LowThreshold ?? 0));
 
         _cardToday.Title = "今日用电";
         _cardToday.Unit = "度";

@@ -48,19 +48,10 @@ public sealed class AppConfig
 
     // ---------- 低电量提醒 ----------
 
-    /// <summary>剩余电量低于这么多度就提醒。</summary>
-    public double LowThreshold { get; set; } = 10;
-
-    /// <summary>
-    /// 另一条提醒线：照眼下的日均算，预计可用低于这么多天就提醒。
-    /// 度数还在阈值以上也提醒——空调一开日均能翻几倍，等跌到阈值可能已经半夜断电了。
-    /// <b>默认 0，也就是不看这一条</b>，只看度数阈值。
-    /// </summary>
-    public double LowDaysThreshold { get; set; }
-
     /// <summary>
     /// 发件的 QQ 邮箱地址。<b>所有宿舍共用这一个发件箱</b>（一个授权码只对应一个邮箱），
-    /// 收件人是按间配的，见 <see cref="Dorm.MailTo"/>；发件人显示名写的是对应那间的房号。
+    /// 什么时候提醒、提醒谁都是按间配的，见 <see cref="Dorm.LowThreshold"/> 和
+    /// <see cref="Dorm.MailTo"/>；发件人显示名写的是对应那间的房号。
     /// </summary>
     public string MailFrom { get; set; } = "";
 
@@ -181,8 +172,6 @@ public sealed class AppConfig
         CurrentDorm = Current?.Key ?? "";
 
         WidgetOffsetX = Math.Clamp(WidgetOffsetX, 0, 2000);
-        LowThreshold = Math.Clamp(LowThreshold, 0, 1000);
-        LowDaysThreshold = Math.Clamp(LowDaysThreshold, 0, 30);
 
         MailFrom = (MailFrom ?? "").Trim();
         MailAuthCode = (MailAuthCode ?? "").Trim();
@@ -203,8 +192,6 @@ public sealed class AppConfig
         ShowWidget = o.ShowWidget;
         WidgetShowExtra = o.WidgetShowExtra;
         WidgetOffsetX = o.WidgetOffsetX;
-        LowThreshold = o.LowThreshold;
-        LowDaysThreshold = o.LowDaysThreshold;
         MailFrom = o.MailFrom;
         MailAuthCode = o.MailAuthCode;
         StartWithWindows = o.StartWithWindows;

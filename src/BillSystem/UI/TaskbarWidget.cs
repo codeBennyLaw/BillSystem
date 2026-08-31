@@ -364,7 +364,7 @@ internal sealed class TaskbarWidget : Form
         _tipRows = new List<WidgetTip.Row>
         {
             new("剩余电量", _remaining is { } rem ? $"{rem:0.00} 度" : "--",
-                Theme.LevelColor(_remaining, _cfg.LowThreshold)),
+                Theme.LevelColor(_remaining, LowThreshold)),
             new("抄表时间", _meterTime is { } mt ? mt.ToString("MM-dd HH:mm") : "--", Theme.Text),
         };
         if (r is not null) _tipRows.Add(new("累计用电", $"{r.Used:0.00} 度", Theme.Text));
@@ -471,10 +471,13 @@ internal sealed class TaskbarWidget : Form
         get
         {
             if (_remaining is null || _error is not null) return SubColor;
-            Color c = Theme.LevelColor(_remaining, _cfg.LowThreshold);
+            Color c = Theme.LevelColor(_remaining, LowThreshold);
             return _light ? Theme.Mix(c, Color.Black, 0.3f) : c; // 浅色任务栏上要压暗一点才看得清
         }
     }
+
+    /// <summary>浮窗和"剩余"那一格的配色照正显示着这一间的阈值来。</summary>
+    private double LowThreshold => _dorm?.LowThreshold ?? 0;
 
     private List<Cell> Column1() => new()
     {

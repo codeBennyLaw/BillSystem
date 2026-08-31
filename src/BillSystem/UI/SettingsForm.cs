@@ -6,10 +6,11 @@ namespace BillSystem.UI;
 
 /// <summary>
 /// 设置窗口，分四页：宿舍 / 提醒 / 组件 / 数据。所有改动先记在一份配置副本上，
-/// 点"保存"才写回真正的配置，点"取消"或直接关窗口就当什么都没发生。
+/// 点"保存"才写回真正的配置并<b>立刻生效</b>——窗口留在原来那一页上，接着改接着存；
+/// 点"关闭"或直接关窗口，没存过的那些改动就当没发生。
 ///
-/// 提醒页上面两项（阈值、发件邮箱）是几间共用的，下面那块是<b>按间配</b>的：
-/// 弹不弹通知、发不发邮件、发到哪几个邮箱，用切换器挑哪一间。
+/// 提醒页上只有发件邮箱是几间共用的，<b>什么时候提醒（剩多少度、还能用几天）和怎么提醒
+/// （弹不弹通知、发不发邮件、发到哪几个邮箱）都是按间配的</b>，用切换器挑哪一间。
 ///
 /// 每页的东西都是切页时重新摆的，所以增删宿舍、增删收件人只要改副本再重摆一次。
 /// 输入控件本身是常驻字段（切页只从 Controls 里摘下来，不销毁），填的值一直留着，保存时统一收上来。
@@ -45,7 +46,15 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
 
     private readonly Segment _tabs = new() { AccessibleName = "设置分页" };
     private readonly UiButton _btnSave = new("保存", BtnKind.Primary);
-    private readonly UiButton _btnCancel = new("取消");
+    private readonly UiButton _btnClose = new("关闭");
+
+    /// <summary>存过之后在按钮栏上留一句"已保存 HH:mm"，不然窗口不关就看不出存没存。</summary>
+    private readonly UiLabel _saved = new()
+    {
+        Font = Theme.FontSmall,
+        ForeColor = Theme.Good,
+        TextAlign = ContentAlignment.MiddleRight,
+    };
 
     private readonly UiText _newB = new()
         { DigitsOnly = true, MaxLength = 4, Placeholder = "楼栋", TextAlign = HorizontalAlignment.Center };
@@ -66,6 +75,13 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
 
     /// <summary>正在配哪一间（<see cref="Dorm.Key"/>）。那一间被删了就落回第一间。</summary>
     private string _alertKey = "";
+
+    /// <summary>
+    /// 两个阈值输入框眼下显示的是哪一间的。<see cref="UiSpin"/> 没有"值变了"的事件，
+    /// 所以只能在重摆页面和保存之前主动收一次（<see cref="StoreAlertSpins"/>），
+    /// 不然换个宿舍、加个收件人，刚调好的阈值就跟着重摆没了。
+    /// </summary>
+    private string _spinsKey = "";
 
     private readonly UiToggle _tglNotify = new("弹 Windows 通知");
     private readonly UiButton _btnNotifyTest = new("试一条通知") { Radius = 6f };
@@ -88,6 +104,9 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
 
     /// <summary>点"试一条通知"时发出，由托盘那边真的弹一条，用来确认系统通知没被关掉。</summary>
     public event Action<Dorm>? TestNotifyRequested;
+
+    /// <summary>点了保存、配置已经写回去了。外面靠它立刻让新设置生效（窗口还开着）。</summary>
+    public event Action? Saved;
 
     /// <summary>每组卡片的位置（画进底图用），以及正在排的那一组从哪儿开始。</summary>
     private readonly List<RectangleF> _cards = new();
@@ -149,20 +168,24 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
         _tabs.SelectionChanged += tag => ShowPage((Page)tag);
         Controls.Add(_tabs);
 
-        _btnSave.Click += (_, _) =>
-        {
-            if (!SaveValues()) return;
-            DialogResult = DialogResult.OK;
-            Close();
-        };
+        _btnSave.Click += (_, _) => Apply();
         Controls.Add(_btnSave);
 
-        _btnCancel.Click += (_, _) =>
-        {
-            DialogResult = DialogResult.Cancel;
-            Close();
-        };
-        Controls.Add(_btnCancel);
+        _btnClose.Click += (_, _) => Close();
+        Controls.Add(_btnClose);
+
+        Controls.Add(_saved);
+    }
+
+    /// <summary>
+    /// 保存：值写回真配置、外面立刻跟上，<b>窗口留在当前页</b>，接着改接着存。
+    /// </summary>
+    private void Apply()
+    {
+        if (!SaveValues()) return;
+
+        _saved.Text = $"已保存 {DateTime.Now:HH:mm}";
+        Saved?.Invoke();
     }
 
     private void WireEvents()
@@ -205,6 +228,7 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
     /// <summary>换页：上一页的控件收走，重新排这一页，窗口高度按内容定。</summary>
     private void ShowPage(Page p)
     {
+        StoreAlertSpins();        // 重摆之前先把阈值收进副本，不然刚调的数就没了
         SuspendLayout();
         _tabs.Select(p);
 
@@ -251,7 +275,8 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
         _barY = h - 54;
 
         _btnSave.SetBounds(W - 20 - 92, h - 43, 92, 34);
-        _btnCancel.SetBounds(_btnSave.Left - 10 - 84, h - 43, 84, 34);
+        _btnClose.SetBounds(_btnSave.Left - 10 - 84, h - 43, 84, 34);
+        _saved.SetBounds(LabelX, h - 38, _btnClose.Left - 12 - LabelX, 24);
 
         _backdrop?.Dispose();
         _backdrop = null;
@@ -273,7 +298,7 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
     private void DormRow(Dorm d)
     {
         var name = new UiLabel { Text = d.Label, ForeColor = Theme.Text };
-        name.SetBounds(LabelX, _y, 150, 26);
+        name.SetBounds(LabelX, _y, 136, 26);
         Put(name);
 
         var result = new UiLabel
@@ -282,7 +307,7 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
             Font = Theme.FontSmall,
             ForeColor = Theme.TextDim,
         };
-        result.SetBounds(LabelX + 156, _y + 1, RightX - DelBtnW - 8 - 68 - 8 - LabelX - 156, 24);
+        result.SetBounds(LabelX + 142, _y + 1, RightX - DelBtnW - 8 - 68 - 8 - LabelX - 142, 24);
         Put(result);
 
         var del = new UiButton("删除") { Radius = 6f };
@@ -298,13 +323,19 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
         _y += 36;
     }
 
-    /// <summary>这一间眼下开着哪些提醒，写在房号后面，不用翻到提醒页去看。</summary>
+    /// <summary>这一间眼下的提醒设置，写在房号后面，不用翻到提醒页去看。</summary>
     private static string AlertSummary(Dorm d)
     {
-        var on = new List<string>(2);
-        if (d.NotifyEnabled) on.Add("通知");
-        if (d.MailEnabled) on.Add($"邮件 {d.MailTo.Count} 个");
-        return on.Count == 0 ? "没开提醒" : "提醒：" + string.Join(" · ", on);
+        var how = new List<string>(2);
+        if (d.NotifyEnabled) how.Add("通知");
+        if (d.MailEnabled) how.Add($"邮件 {d.MailTo.Count} 个");
+        if (how.Count == 0) return "没开提醒";
+
+        // 一行只有 230 像素，两条阈值都写上还要留住"通知 / 邮件"，所以写得紧一点
+        string when = d.LowDaysThreshold > 0
+            ? $"低于 {d.LowThreshold:0.##} 度 / {d.LowDaysThreshold:0.##} 天"
+            : $"低于 {d.LowThreshold:0.##} 度";
+        return $"{when} · {string.Join(" · ", how)}";
     }
 
     private void AddDormRow()
@@ -405,27 +436,28 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
 
     private void BuildAlert()
     {
-        Section("什么时候提醒");
-        Row("剩余低于", _threshold, "度", 110);
-        // 这一项是 0 就不看"还能用几天"，只按剩余度数提醒
-        Row("预计可用不足", _daysLeft, "天", 110);
-
-        Section("发件邮箱（几间共用）");
-        Row("QQ 邮箱", _mailFrom, null, 250);
-        Row("授权码", _mailCode, null, 250);
-
         Dorm? d = AlertDorm;
-        Section("怎么提醒");
         if (d is null)
         {
+            Section("提醒");
             Hint("还没有宿舍，先到“宿舍”页加一间。");
+            MailFromCard();
             return;
         }
 
         _alertKey = d.Key;
         LoadDormAlert(d);
+
+        // 底下两张卡都是配这一间的，先把"哪一间"摆在最上面
+        Section("配哪一间");
         DormPicker(d);
 
+        Section("什么时候提醒");
+        Row("剩余低于", _threshold, "度", 110);
+        // 这一项是 0 就不看"还能用几天"，只按剩余度数提醒
+        Row("预计可用不足", _daysLeft, "天", 110);
+
+        Section("怎么提醒");
         AddToggle(_tglNotify, _btnNotifyTest);
         AddToggle(_tglMail, _btnMailTest);
         Result(_mailResult);
@@ -433,6 +465,16 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
         if (d.MailTo.Count == 0) Hint("还没有收件人，在下面加一个。");
         else foreach (string to in d.MailTo.ToList()) MailRow(d, to);
         AddMailRow();
+
+        MailFromCard();
+    }
+
+    /// <summary>发件箱只有一个：一个授权码只对应一个邮箱，几间宿舍都从这儿发出去。</summary>
+    private void MailFromCard()
+    {
+        Section("发件邮箱（几间共用）");
+        Row("QQ 邮箱", _mailFrom, null, 250);
+        Row("授权码", _mailCode, null, 250);
     }
 
     /// <summary>配哪一间：两间以上摆切换器，只有一间就写一行房间名（没什么可切的）。</summary>
@@ -458,8 +500,23 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
 
     private void LoadDormAlert(Dorm d)
     {
+        _threshold.Value = d.LowThreshold;
+        _daysLeft.Value = d.LowDaysThreshold;
+        _spinsKey = d.Key;
         _tglNotify.SetSilently(d.NotifyEnabled);
         _tglMail.SetSilently(d.MailEnabled);
+    }
+
+    /// <summary>
+    /// 把两个阈值收回它们属于的那一间。开关和收件人是拨一下就写进副本的，
+    /// 阈值只能这么收（<see cref="_spinsKey"/> 说了为什么）：重摆页面前、保存前各收一次。
+    /// </summary>
+    private void StoreAlertSpins()
+    {
+        if (_draft.Dorms.FirstOrDefault(x => x.Key == _spinsKey) is not { } d) return;
+
+        d.LowThreshold = _threshold.Value;
+        d.LowDaysThreshold = _daysLeft.Value;
     }
 
     private void MailRow(Dorm d, string to)
@@ -522,6 +579,7 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
     /// <summary>拿现在填的发件邮箱和授权码，给正配的这一间真发一封，不用先保存。</summary>
     private async Task TestMailAsync()
     {
+        StoreAlertSpins();        // 信里那句"提醒条件"要照眼下调的阈值写
         if (AlertDorm is not { } d) return;
 
         _btnMailTest.Enabled = false;
@@ -777,8 +835,6 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
 
     private void LoadValues()
     {
-        _threshold.Value = _draft.LowThreshold;
-        _daysLeft.Value = _draft.LowDaysThreshold;
         _offsetX.Value = _draft.WidgetOffsetX;
         _mailFrom.Text = _draft.MailFrom;
         _mailCode.Text = _draft.MailAuthCode;
@@ -790,13 +846,13 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
     }
 
     /// <summary>
-    /// 把界面上的值写进副本，再一次性覆盖到真配置。返回 false 表示别关窗口。
-    /// 按间存的那几项（通知 / 邮件开关、收件人）拨的时候就已经写进副本了，这儿不用再收。
+    /// 把界面上的值写进副本，再一次性覆盖到真配置。返回 false 表示这次没存下去。
+    /// 按间存的那几项（通知 / 邮件开关、收件人）拨的时候就已经写进副本了，
+    /// 两个阈值靠 <see cref="StoreAlertSpins"/> 收。
     /// </summary>
     private bool SaveValues()
     {
-        _draft.LowThreshold = _threshold.Value;
-        _draft.LowDaysThreshold = _daysLeft.Value;
+        StoreAlertSpins();
         _draft.MailFrom = (_mailFrom.Text ?? "").Trim();
         _draft.MailAuthCode = (_mailCode.Text ?? "").Trim();
         _draft.ShowWidget = _tglWidget.Checked;
@@ -819,7 +875,6 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
     {
         if (keyData == Keys.Escape)
         {
-            DialogResult = DialogResult.Cancel;
             Close();
             return true;
         }
@@ -827,11 +882,7 @@ internal sealed class SettingsForm : Form, Theme.IBackdropHost
         // 回车相当于点保存，但焦点在输入框里时先让它自己收下这一下
         if (keyData == Keys.Enter && ActiveControl is not UiSpin && ActiveControl is not UiText)
         {
-            if (SaveValues())
-            {
-                DialogResult = DialogResult.OK;
-                Close();
-            }
+            Apply();
             return true;
         }
 

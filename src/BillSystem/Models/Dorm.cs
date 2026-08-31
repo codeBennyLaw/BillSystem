@@ -5,13 +5,24 @@ namespace BillSystem.Models;
 /// <summary>
 /// 一间宿舍：楼栋 + 房号。数据文件名（<c>readings-B43-R422.jsonl</c>）和界面上的房间名都从这儿来。
 ///
-/// 提醒也是按间配的：这间弹不弹 Windows 通知、发不发邮件、发到哪几个邮箱，各自说各自的。
-/// 阈值（剩多少度、还能用几天）是所有宿舍共用一套，见 <see cref="AppConfig.LowThreshold"/>。
+/// 提醒整套都是按间配的：什么时候提醒（剩多少度、还能用几天）、怎么提醒（弹不弹通知、
+/// 发不发邮件、发到哪几个邮箱），各自说各自的。共用的只有那个发件箱，
+/// 见 <see cref="AppConfig.MailFrom"/>。
 /// </summary>
 public sealed class Dorm
 {
     public int Building { get; set; }
     public int Room { get; set; }
+
+    /// <summary>这间剩余电量低于这么多度就提醒。</summary>
+    public double LowThreshold { get; set; } = 10;
+
+    /// <summary>
+    /// 这间的另一条提醒线：照眼下的日均算，预计可用低于这么多天就提醒。
+    /// 度数还在阈值以上也提醒——空调一开日均能翻几倍，等跌到阈值可能已经半夜断电了。
+    /// <b>默认 0，也就是不看这一条</b>，只看度数阈值。
+    /// </summary>
+    public double LowDaysThreshold { get; set; }
 
     /// <summary>这间低电量时弹一条 Windows 通知。默认关。</summary>
     public bool NotifyEnabled { get; set; }
@@ -56,6 +67,8 @@ public sealed class Dorm
     /// <summary>整间复制一份（设置窗口在副本上改，收件人列表得单独复制）。</summary>
     public Dorm Clone() => new(Building, Room)
     {
+        LowThreshold = LowThreshold,
+        LowDaysThreshold = LowDaysThreshold,
         NotifyEnabled = NotifyEnabled,
         MailEnabled = MailEnabled,
         MailTo = new List<string>(MailTo),
@@ -67,14 +80,19 @@ public sealed class Dorm
     /// </summary>
     public void CopyAlertsFrom(Dorm o)
     {
+        LowThreshold = o.LowThreshold;
+        LowDaysThreshold = o.LowDaysThreshold;
         NotifyEnabled = o.NotifyEnabled;
         MailEnabled = o.MailEnabled;
         MailTo = new List<string>(o.MailTo);
     }
 
-    /// <summary>收件人去掉空的和重复的。</summary>
+    /// <summary>阈值夹回可用范围，收件人去掉空的和重复的。</summary>
     internal void Normalize()
     {
+        LowThreshold = Math.Clamp(LowThreshold, 0, 1000);
+        LowDaysThreshold = Math.Clamp(LowDaysThreshold, 0, 30);
+
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         MailTo = (MailTo ?? new List<string>())
             .Select(s => (s ?? "").Trim())

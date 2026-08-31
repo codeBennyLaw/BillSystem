@@ -20,11 +20,14 @@ internal static class DevShot
         // 出图用假房号和假邮箱，别把真实数据和真邮箱印进 docs 里的图
         var dorm = new Dorm(999, 9999)
         {
+            LowThreshold = 5,
+            LowDaysThreshold = 0.5,
             NotifyEnabled = true,
             MailEnabled = true,
             MailTo = { "someone@example.com", "roommate@example.com" },
         };
-        var one = new Dorm(998, 9998) { NotifyEnabled = true };
+        // 两间的阈值各配一套，宿舍页那行摘要才看得出提醒是按间算的
+        var one = new Dorm(998, 9998) { LowThreshold = 15, NotifyEnabled = true };
 
         // 两间：主界面上就能看到宿舍切换器（只有一间时那儿是一行房间名）
         var session = new DormSession(dorm, api);
@@ -146,7 +149,6 @@ internal static class DevShot
         // 提醒邮件的排版：两种触发条件各写一份 HTML，浏览器直接打开就能看，不用真发信。
         // 样张的数字自己凑一套齐的（4.2 度、日均 9.8 度 → 还能用十来个小时），
         // 拿真读数改一个剩余度数出来的话，"剩 4.2 度"和"还能用 4.8 天"会对不上
-        var mailCfg = new AppConfig { LowThreshold = 5, LowDaysThreshold = 0.5 };
         var lowNow = new Reading
         {
             SlotTime = last.SlotTime,
@@ -172,9 +174,9 @@ internal static class DevShot
         };
         var utf8 = new System.Text.UTF8Encoding(false);
         File.WriteAllText(Path.Combine(outDir, "mail-low.html"),
-            MailAlert.LowLetter(mailCfg, dorm, lowNow, mailSummary, belowThreshold: true).Html, utf8);
+            MailAlert.LowLetter(dorm, lowNow, mailSummary, belowThreshold: true).Html, utf8);
         File.WriteAllText(Path.Combine(outDir, "mail-soon.html"),
-            MailAlert.LowLetter(mailCfg, dorm, lowNow, mailSummary, belowThreshold: false).Html, utf8);
+            MailAlert.LowLetter(dorm, lowNow, mailSummary, belowThreshold: false).Html, utf8);
 
         // 充值窗口：假记录 + 一张现成的付款码，offline 保证不联网、不下单。
         // 上面主界面用过的那几笔之外再补一批，好把记录列表填满
